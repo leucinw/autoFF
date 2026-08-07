@@ -3,7 +3,10 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python>=3.9
+  # Upper bound keeps the solver off the free-threaded 3.14 builds: ruamel.yaml's
+  # C extension has not declared free-threading support, so loading it re-enables
+  # the GIL and emits a RuntimeWarning on every run.
+  - python>=3.9,<3.14
   - numpy
   - scipy
   - ruamel.yaml
