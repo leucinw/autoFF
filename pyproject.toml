@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autoff"
+version = "2.0.0"
+description = "Automated force field property simulation and parameter fitting for Tinker/AMOEBA"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{name = "Chengwen Liu", email = "liuchw2010@gmail.com"}]
+dependencies = [
+    "numpy",
+    "scipy",
+    "ruamel.yaml",
+]
+
+[project.scripts]
+autoff = "autoff.cli:main"
+autoff-submit = "autoff.submit:main"
+
+[tool.setuptools.packages.find]
+include = ["autoff*"]
+
+[tool.setuptools.package-data]
+autoff = ["data/*"]

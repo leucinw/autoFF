@@ -1,0 +1,87 @@
+# =============================================================================
+# Multiple systems in one run: two solute hydration free energies plus a neat
+# liquid density at two temperatures, all sharing one parameter file.
+#
+#   autoff run config.yaml --dry-run   # inspect every generated input first
+#   autoff run config.yaml             # submit and collect
+#   autoff check config.yaml           # per-system progress at any time
+#
+# Every system gets its own directory under systems/, and all of them are
+# submitted together and polled in one loop, so the wall time is set by the
+# slowest system rather than by their sum.
+#
+# Switch job.type to 'optimize' (see the block at the bottom) to fit the
+# shared parameter file to all three properties at once.
+# =============================================================================
+
+workdir: .
+
+shared:
+  parameters: input/amoeba09.prm      # ONE force field for every system below
+  checking_time: 120.0
+
+  md_defaults:                        # inherited by each hfe_system
+    liquid:
+      total_time: 0.5                 # ns
+      time_step: 2.0                  # fs
+      write_freq: 1.0                 # ps
+      ensemble: NPT
+      temperature: 298.15             # K
+      pressure: 1.0                   # atm
+    gas:
+      total_time: 0.5
+      time_step: 0.1
+      write_freq: 1.0
+      temperature: 298.15
+
+  node_list:
+    - node194
+    - node195
+    - node210
+    - node211
+    - node212
+    - node215
+
+hfe_systems:
+  - name: phenol
+    gas_xyz: input/phenol.xyz
+    box_xyz: input/phenol_solv.xyz
+    expt: -6.62                       # kcal/mol
+    weight: 1.0
+    lambda_window: courser
+    copy_arc_for_perturb: true
+
+  - name: sodium
+    gas_xyz: input/Na.xyz             # 1 atom, so the gas leg is skipped
+    box_xyz: input/Na-water.xyz
+    expt: -88.7                       # kcal/mol
+    weight: 1.0
+    lambda_window: courser
+    copy_arc_for_perturb: true
+    md:                               # this system overrides the shared defaults
+      liquid:
+        total_time: 0.25
+
+liquids:
+  - name: water_neat
+    box_xyz: input/water_box.xyz      # 898 waters, 30 A cube
+    temperatures: [298.15, 323.15]    # K
+    expt_densities: [997.0, 988.0]    # kg/m^3
+    weights: [1.0, 1.0]               # normalized internally by temperature count
+    equil_time: 0.02                  # ns discarded before averaging
+    production_time: 0.2              # ns averaged
+    md:
+      time_step: 2.0                  # fs
+      write_freq: 0.1                 # ps
+      pressure: 1.0                   # atm
+
+job:
+  type: single-point
+
+  # To fit instead of just report, set type above to 'optimize'. Every property
+  # that has a reference value becomes one residual in a single least-squares
+  # vector, so the two HFEs and both densities are balanced against each other.
+  optimize:
+    opt_params:   ["vdw-34 3.4050 0.1100"]   # water oxygen R and epsilon
+    params_range: ["0.15   0.04"]
+    diff_step: 0.0001

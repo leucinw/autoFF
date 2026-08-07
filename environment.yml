@@ -1,8 +1,13 @@
-name: autobar
+name: autoff
 channels:
   - conda-forge
   - defaults
 dependencies:
+  - python>=3.9
   - numpy
   - scipy
   - ruamel.yaml
+  - pytest
+  - pip
+  - pip:
+      - -e .

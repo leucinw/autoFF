@@ -1,494 +1,345 @@
+# autoFF
 
-# autoBAR
+Automated free-energy simulation and force-field parameter fitting with
+[Tinker](https://dasher.wustl.edu/tinker/) and
+[Tinker9](https://github.com/TinkerTools/tinker9).
 
-**Automated Free Energy Simulations with the Bennett Acceptance Ratio (BAR) Method**
-
-autoBAR is a lightweight automation tool for running alchemical free energy simulations using [Tinker](https://dasher.wustl.edu/tinker/) and [Tinker9](https://github.com/TinkerTools/tinker9). It supports the polarizable AMOEBA and AMOEBA+ force fields and uses the [Bennett Acceptance Ratio](https://en.wikipedia.org/wiki/Bennett_acceptance_ratio) for free energy estimation.
+One configuration file describes an entire study: any number of solutes whose
+hydration free energies you want, any number of neat liquids whose densities
+you want, and any number of dimer geometries. autoFF either **reports** every
+one of those properties (`single-point`) or **fits** a shared parameter file so
+they all match reference values at once (`optimize`).
 
 ---
 
-## Prerequisites
+## Contents
 
-| Category | Requirements |
-|----------|-------------|
-| **Python** (≥ 3.8) | `numpy`, `scipy` (only for `parmOPT.py`), `ruamel.yaml` (both `< 0.18` and `≥ 0.18` are supported) |
-| **Simulation Software** | [Tinker](https://dasher.wustl.edu/tinker/) (CPU) and [Tinker9](https://github.com/TinkerTools/tinker9) (GPU) |
+- [Install](#install)
+- [Quick start](#quick-start)
+- [How it works](#how-it-works)
+- [Configuration reference](#configuration-reference)
+- [Job types](#job-types)
+- [Directory layout](#directory-layout)
+- [Command reference](#command-reference)
+- [Examples](#examples)
+- [Notes and limitations](#notes-and-limitations)
 
-A conda environment file is provided:
+---
+
+## Install
 
 ```bash
-conda env create -f environment.yml
-conda activate autobar
+git clone https://github.com/leucinw/autoFF.git
+cd autoFF
+pip install -e .
 ```
 
-## Project Structure
+Dependencies are numpy, scipy and ruamel.yaml; `environment.yml` provides a
+conda environment. Installing puts two commands on your path: `autoff` and
+`autoff-submit`.
 
-```
-autoBAR/
-├── autoBAR.py              # Main driver script
-├── environment.yml         # Conda environment specification
-├── tests/                  # Test suite
-├── dat/                    # Default configuration files
-│   ├── settings.yaml       # Example settings template
-│   ├── gas.key             # Default gas-phase key file
-│   ├── liquid.key          # Default liquid-phase key file
-│   ├── orderparams_courser # Coarser lambda schedule (18 windows)
-│   ├── orderparams_default # Standard lambda schedule (26 windows)
-│   └── tinker.env          # Tinker executable paths
-├── utils/                  # Utility modules
-│   ├── checkautobar.py     # Progress monitoring for MD and BAR jobs
-│   ├── elescale.py         # Electrostatic parameter scaling
-│   ├── parmOPT.py          # Parameter optimization against HFE, density and dimer targets
-│   └── submitTinker.py     # Cluster job submission helper
-└── examples/               # Ready-to-use example systems
-    ├── Ion-HFE/            # Na⁺ hydration free energy
-    ├── Phenol-HFE/         # Phenol hydration free energy
-    └── Phenol-HFE-Dimer/   # Phenol HFE + dimer interaction energy (parmOPT)
-```
-
-## Setup
-
-### 1. Configure Tinker Paths
-
-Edit `dat/tinker.env` to point to your local Tinker and Tinker9 installations:
+You also need working Tinker8 and Tinker9 builds. Their locations come from a
+small environment file listing `$DYNAMIC8/9`, `$BAR8/9`, `$ANALYZE8/9` and
+`$MINIMIZE8/9`. The bundled default is `autoff/data/tinker.env`; point
+`shared.tinker_env` at your own copy:
 
 ```bash
 export TINKER8=/path/to/tinker
-export DYNAMIC8="$TINKER8/dynamic"
-export ANALYZE8="$TINKER8/analyze"
-export BAR8="$TINKER8/bar"
+export  DYNAMIC8="$TINKER8/dynamic"
+export  ANALYZE8="$TINKER8/analyze"
+export      BAR8="$TINKER8/bar"
 export MINIMIZE8="$TINKER8/minimize"
 
 export tk9home=/path/to/tinker9/build
-export DYNAMIC9="$tk9home/dynamic9"
-export ANALYZE9="$tk9home/analyze9"
-export BAR9="$tk9home/bar9"
+export  DYNAMIC9="$tk9home/dynamic9"
+export  ANALYZE9="$tk9home/analyze9"
+export      BAR9="$tk9home/bar9"
 export MINIMIZE9="$tk9home/minimize9"
 ```
 
-### 2. Prepare Input Files
+---
 
-Place the following four files in your working directory:
+## Quick start
 
-| File | Description |
-|------|-------------|
-| `gas_xyz` | Ligand Tinker `.xyz` file |
-| `box_xyz` | Solvated system Tinker `.xyz` file (box dimensions on line 2) |
-| `parameters` | Tinker force field parameter file (`.prm`) |
-| `settings.yaml` | Simulation settings — see the [template](dat/settings.yaml) |
+```bash
+cd examples/Phenol-HFE
 
-> **Tip:** Custom `.key` files are supported. Set `liquid_key` and/or `gas_key` in `settings.yaml` to use your own key files instead of the defaults.
+autoff run config.yaml --dry-run   # generate every input file, submit nothing
+autoff run config.yaml             # submit, wait, and report
+autoff check config.yaml           # progress of a run already under way
+```
 
-### 3. Configure `settings.yaml`
+`--dry-run` is the fastest way to see what a config will actually do: it
+writes every key file and job script and records the intended submissions in
+`results/submitted_jobs.txt`, without touching the cluster.
 
-Key settings to configure (see [`dat/settings.yaml`](dat/settings.yaml) for the full reference):
+---
+
+## How it works
+
+**Hydration free energy.** A solute is decoupled from water in stages: first
+its electrostatics are switched off, then its van der Waals interactions.
+Each stage is a *lambda window* with its own MD trajectory. Consecutive
+windows are combined with Bennett Acceptance Ratio (BAR), and the per-window
+free energies sum to the transfer free energy. The same decoupling is repeated
+in the gas phase and subtracted, which removes the solute's intramolecular
+contribution. Solutes with fewer than five atoms have no such contribution, so
+their gas leg is skipped automatically.
+
+**Neat-liquid density.** One NPT trajectory per temperature; the density is
+the mean over production frames, after discarding an equilibration segment.
+
+**Dimer energies.** `E_int = E_dimer - E_mon1 - E_mon2` from single-point
+energy evaluations, optionally after letting the trial parameters relax the
+dimer geometry.
+
+**Fitting.** Every property with a reference value becomes one entry in a
+single residual vector:
+
+```
+residual = weight * (calculated - reference) / denominator
+```
+
+The denominator normalizes across units, so a density in kg/m³ and a free
+energy in kcal/mol pull on the fit comparably. It defaults to the spread
+(standard deviation) of the reference values when several exist, and to
+`sqrt(|value|)` for a lone one — the ForceBalance convention. `scipy`'s
+`least_squares` (trust-region reflective, soft-L1 loss) minimizes the sum of
+squares subject to the bounds you give.
+
+**Why fitting is affordable.** Derivatives never rerun dynamics. To evaluate a
+perturbed parameter set, autoFF adds an extra window at a fictitious lambda
+above 1.0 that *reweights the existing fully-coupled trajectory* — so a trial
+parameter set costs one BAR evaluation instead of a full simulation. Density
+derivatives use the fluctuation formula (Eq. 4 of Wang et al., *J. Chem.
+Theory Comput.* 2013):
+
+```
+d⟨ρ⟩/dλ = -β ( ⟨ρ·dE/dλ⟩ - ⟨ρ⟩⟨dE/dλ⟩ )
+```
+
+where `dE/dλ` comes from re-analyzing the stored production frames.
+
+---
+
+## Configuration reference
+
+### `shared`
+
+| Key | Required | Meaning |
+|---|---|---|
+| `parameters` | yes | The one `.prm` file every system uses |
+| `tinker_env` | no | Path to a Tinker environment file (default: bundled) |
+| `node_list` | no | Cluster hostnames; empty falls back to the site node file |
+| `checking_time` | no | Seconds between completeness polls (default 60) |
+| `verbose` | no | 0 quieter, 1 normal (default 1) |
+| `skip_completeness_check` | no | Trust existing `.arc`/`.ene` files (default false) |
+| `md_defaults` | no | `liquid:` and `gas:` blocks inherited by every HFE system |
+
+### `hfe_systems` (a list)
+
+| Key | Required | Meaning |
+|---|---|---|
+| `name` | yes | Unique; becomes the directory name |
+| `gas_xyz` | yes | Solute alone, Tinker `.xyz` |
+| `box_xyz` | yes | Solute in a solvent box, with a box line; each side ≥ 30 Å |
+| `expt` | for fitting | Reference HFE, kcal/mol |
+| `weight` | no | Relative weight in the fit (default 1.0) |
+| `denom` | no | Overrides the automatic scale normalizer |
+| `lambda_window` | no | `courser` (18 windows), `default` (26), or a path |
+| `copy_arc_for_perturb` | no | Reweight the coupled trajectory for perturbed parameters (default true) |
+| `manual_ele_scale` | no | Scale multipoles in the key instead of using `ele-lambda` |
+| `liquid_key` / `gas_key` | no | Custom key templates |
+| `md` | no | Per-system overrides deep-merged onto `md_defaults` |
+
+MD blocks take `total_time` (ns), `time_step` (fs), `write_freq` (ps),
+`temperature` (K); liquid also takes `pressure` (atm) and `ensemble`
+(`NPT`/`NVT`). Setting a gas `total_time` of 0 disables the gas leg.
+
+### `liquids` (a list)
+
+| Key | Required | Meaning |
+|---|---|---|
+| `name` | yes | Unique; becomes the directory name |
+| `box_xyz` | yes | Neat-liquid box |
+| `temperatures` | yes | One or more, K |
+| `expt_densities` | for fitting | One per temperature, kg/m³ |
+| `weights` | no | One per temperature; normalized internally by their count |
+| `denom` | no | Overrides the automatic scale normalizer |
+| `equil_time` | no | ns discarded before averaging (default 0.02) |
+| `production_time` | yes | ns averaged |
+| `key` | no | Key template; otherwise derived from the bundled liquid key |
+| `md` | no | `time_step`, `write_freq`, `pressure` |
+
+### `dimers` (a list) and `dimer_opt`
+
+| Key | Required | Meaning |
+|---|---|---|
+| `xyz` / `start_xyz` | yes | Dimer geometry |
+| `frag1_natoms` | yes | The first fragment is the leading N atoms |
+| `expt` / `target` | for fitting | Reference interaction/binding energy, kcal/mol |
+| `weight` | no | Relative weight (default 1.0) |
+| `grad` | `dimer_opt` only | RMS gradient convergence for the relaxation |
+
+### `job`
 
 ```yaml
-# Lambda schedule: "courser" (18 windows) or "default" (26 windows)
-# (the value is case-insensitive; "courser" is the literal key the code expects)
-lambda_window: courser
-
-# Input files
-gas_xyz: ligand.xyz
-box_xyz: solvated.xyz
-parameters: forcefield.prm
-
-# Liquid-phase MD settings
-liquid_md_total_time: 1.25    # ns
-liquid_md_time_step: 2.0      # fs (RESPA integrator)
-liquid_md_ensemble: NPT
-liquid_md_temperature: 300.0  # K
-
-# Gas-phase MD settings (set gas_md_total_time to 0 to skip)
-gas_md_total_time: 1.25       # ns
-gas_md_time_step: 0.1         # fs (stochastic dynamics)
-gas_md_temperature: 300.0     # K
-
-# Cluster nodes for job distribution
-node_list:
-  - node01
-  - node02
-
-# One-step perturbation (only used when a "<parameters>_XX" file exists):
-#   YES  → reuse the reference trajectory  → true one-step FEP
-#   NO   → re-run dynamics for a new state → BAR (see the section below)
-copy_arc_for_perturb: YES
+job:
+  type: single-point            # or: optimize
+  optimize:
+    opt_params:   ["vdw-36 3.4050 0.1100"]
+    params_range: ["0.20   0.05"]
+    diff_step: 0.0001           # finite-difference step
+    ftol: 0.0001                # convergence tolerances
+    gtol: 0.0001
+    xtol: 0.0001
 ```
 
-## Usage
+Each `opt_params` entry is `"<term_key> <value1> <value2> ..."` with a matching
+range string. The term key uses hyphens where the Tinker line has fields, so
+`vdw-36` writes `vdw   36   ...` and `vdwpair-401-402` writes
+`vdwpair   401   402   ...`. Bounds are `value ± range`; **a range of 0 pins
+that value** — it is written unchanged but hidden from the optimizer.
 
-autoBAR can be run in **interactive** or **automated** mode.
+Optimized parameters are written as override lines appended to a pristine copy
+of your `.prm`. Tinker takes the last definition of a term, so the appended
+line supersedes the original. The result lands in `prm/<name>.prm.final`.
 
-### Interactive Mode
+---
 
-Run individual steps as needed:
+## Job types
+
+### `single-point`
+
+Runs every configured simulation and reports every derived property, with the
+deviation from each reference value you supplied. Output goes to
+`results/singlepoint.txt` (human-readable), `results/singlepoint.yaml`
+(machine-readable), and one `results/hfe_<name>.txt` per solute with its
+per-window BAR breakdown.
+
+### `optimize`
+
+Fits the shared parameter file to all targets jointly, reusing the
+single-point machinery to evaluate the objective. Each step logs a table of
+every target with its current value, reference, difference, and weighted
+residual.
+
+Systems without a reference value still run — they are simply reported rather
+than fitted.
+
+---
+
+## Directory layout
+
+Everything a run generates lives under `workdir`, separated per system so
+nothing collides:
+
+```
+<workdir>/
+├── config.yaml
+├── prm/
+│   ├── amoeba09.prm            # working copy, rewritten each optimizer step
+│   ├── amoeba09.prm.orig       # pristine snapshot; your input is never touched
+│   ├── amoeba09.prm_01 …       # perturbation sidecars
+│   └── amoeba09.prm.final      # optimized output
+├── systems/
+│   ├── phenol/{gas,liquid}/    # lambda windows, trajectories, BAR output, FEP_NN/
+│   ├── sodium/liquid/
+│   └── water_neat/             # one trajectory per temperature
+└── results/
+    ├── singlepoint.txt / .yaml
+    ├── hfe_<name>.txt
+    ├── autoff.log
+    └── submitted_jobs.txt      # dry-run manifest
+```
+
+Your input files are only ever read. Coordinates are copied into the system
+directory before minimization, and the parameter file is snapshotted, so
+rerunning never mutates what you supplied.
+
+---
+
+## Command reference
+
+```
+autoff run    config.yaml [--dry-run] [-s/--skip-check] [-v N]
+autoff setup  config.yaml [--dry-run]
+autoff check  config.yaml
+autoff report config.yaml [-s/--skip-check]
+```
+
+- `run` — execute the job named by `job.type`, end to end.
+- `setup` — generate directories, keys and scripts; submit nothing.
+- `check` — print per-system completeness without changing anything.
+- `report` — collect results from output files already on disk.
+- `--skip-check` — assume `.arc`/`.ene` files are complete. Skips the expensive
+  scans; only use it when you are sure.
+
+Jobs are dispatched over SSH by `autoff-submit`, which polls `nproc`/`top` for
+CPU nodes and `nvidia-smi` for free GPUs and retries until every job is placed.
+It can also be used standalone:
 
 ```bash
-# Step 1: Generate simulation input files
-python autoBAR.py setup
-
-# Step 2: Run MD simulations across all lambda windows
-python autoBAR.py dynamic
-
-# Step 3: Perform BAR free energy analysis
-python autoBAR.py bar
-
-# Step 4: Collect and summarize results
-python autoBAR.py result
+autoff-submit -x run_md.sh -t GPU -nodes node103 node104
 ```
 
-### Skipping the Completeness Check
+Submission is fire-and-forget — there is no queue system and no job IDs — so
+completion is detected by polling output files. All systems are submitted
+together and advanced by one loop, so a fast system reaches BAR while a slow
+one is still running dynamics; the wall time is set by the slowest system
+rather than by their sum.
 
-Before running BAR, autoBAR counts the snapshots in every `.arc` trajectory; before
-collecting results, it verifies that every `.ene` file contains the BAR convergence
-line. On large trajectories the `.arc` scan dominates the runtime of `bar`.
-
-If you already know these files are present and complete, skip the verification with
-`--skip-check` (short form `-s`):
-
-```bash
-python autoBAR.py bar --skip-check
-python autoBAR.py result --skip-check
-```
-
-The same behavior can be made persistent in `settings.yaml`:
-
-```yaml
-skip_completeness_check: True
-```
-
-The command line flag takes precedence, so a run started with `--skip-check` skips the
-check even when the setting is absent or `False`.
-
-With the check disabled autoBAR also stops deleting `.bar`/`.ene` files that its
-staleness heuristics would otherwise flag for regeneration, and `auto` mode no longer
-waits for the MD and BAR jobs to finish — it assumes they already have. Use the flag
-only when that is true; incomplete files will silently produce wrong free energies.
-
-### Automated Mode
-
-Run the entire workflow end-to-end:
-
-```bash
-python autoBAR.py auto
-```
-
-In automated mode, autoBAR will:
-1. Generate all input files (`setup`)
-2. Submit MD jobs and wait for completion (`dynamic`)
-3. Submit BAR analysis jobs and wait for completion (`bar`)
-4. Collect and print the final free energy (`result`)
-
-## Workflow Overview
-
-```
-setup ──► dynamic ──► bar ──► result
-  │          │         │        │
-  │          │         │        └─ Parse .ene files, sum ΔG, write result.txt
-  │          │         └────────── Run BAR on trajectory pairs (arc0, arc1)
-  │          └──────────────────── Run MD at each λ window (liquid: GPU, gas: CPU)
-  └─────────────────────────────── Generate .key/.xyz per λ window, minimize
-```
+---
 
 ## Examples
 
-### Ion Hydration Free Energy (Na⁺)
+| Example | Shows |
+|---|---|
+| `examples/Phenol-HFE` | Single solute HFE, the simplest possible config |
+| `examples/Ion-HFE` | Monatomic ion; the gas leg is disabled automatically |
+| `examples/Multi-Property` | **Two solutes plus a neat liquid at two temperatures, one shared parameter file** |
+| `examples/Phenol-HFE-Dimer` | Fitting van der Waals parameters to an HFE and a dimer energy |
 
-Only the liquid phase is needed (small ion → gas phase is skipped automatically):
+Run any of them with `autoff run config.yaml --dry-run` first to inspect what
+would be submitted.
 
-```
-examples/Ion-HFE/
-├── Na.xyz              # Gas-phase ion structure
-├── Na-water.xyz        # Solvated ion + water box
-├── water03.prm         # Force field parameters
-├── settings.yaml       # Simulation settings
-└── result.txt          # Reference output
-```
+> The dimer geometry and reference energy in `Phenol-HFE-Dimer` are
+> illustrative placeholders, not QM-derived values. Replace them before drawing
+> conclusions from a fit.
 
-### Phenol Hydration Free Energy
+---
 
-Both gas and liquid phases are required:
+## Notes and limitations
 
-```
-examples/Phenol-HFE/
-├── phenol.xyz          # Gas-phase phenol structure
-├── phenol_solv.xyz     # Solvated phenol + water box
-├── amoeba09.prm        # AMOEBA force field parameters
-├── settings.yaml       # Simulation settings
-└── result.txt          # Reference output
-```
+- **BAR equilibration.** The first 20% of every trajectory is discarded. A
+  window therefore needs at least 6 snapshots, which is validated at load time.
+- **Box shape.** Neat-liquid densities assume a cubic box (`V = a³`).
+- **Parameter count.** Perturbation sidecars are numbered `_01`.., and a
+  gradient needs two per free parameter plus one, so at most 49 parameters can
+  be fitted at once. This is checked when the config loads.
+- **Monomer caching.** The `dimer_opt` target caches relaxed monomer energies
+  once, which assumes the fitted terms do not change intramolecular energy —
+  true for a van der Waals class whose 1-2 interactions are excluded, but not
+  in general.
+- **Saturated clusters.** Submission blocks until every job is placed, so a
+  full cluster stalls the polling loop.
+- **Resuming.** A partial trajectory with a `.dyn` checkpoint is resumed for
+  only its outstanding steps; a complete one is reused. Stale `.bar`/`.ene`
+  files from a run with different sampling are detected and regenerated.
 
-## One-Step Perturbation (FEP or BAR)
-
-autoBAR can evaluate the free-energy difference to one or more perturbed end states
-(e.g. small force-field parameter changes) without redefining the lambda schedule:
-
-1. Place one or more perturbed parameter files named `<parameters>_XX` (where `XX` = `01` to
-   `99`) in the working directory next to your main parameter file. For example, if
-   `parameters: forcefield.prm`, the perturbed files are `forcefield.prm_01`, `forcefield.prm_02`, …
-2. Each perturbed file defines a new end state, appended to the lambda schedule as an extra window.
-3. No other change to `settings.yaml` is required — autoBAR detects the files automatically.
-4. Results are reported as `FEP_001`, `FEP_002`, … in `result.txt`.
-
-### FEP vs. BAR — set by `copy_arc_for_perturb`
-
-The estimator used for the perturbation depends on whether the reference and perturbed
-states share a trajectory, which is controlled by the `copy_arc_for_perturb` setting:
-
-| `copy_arc_for_perturb` | Trajectory used for the perturbed state | Estimator |
-|------------------------|-----------------------------------------|-----------|
-| `YES` (default) | Reuses the reference end-state trajectory (the **same** `.arc` is symlinked for both states) | **One-step FEP** (Zwanzig exponential averaging over a single ensemble) |
-| `NO` | Re-runs dynamics with the perturbed parameters to generate a **separate** `.arc` | **BAR** (two independent trajectories, one per state) |
-
-In other words, the result is true one-step FEP **only when the same trajectory file is
-reused** (`copy_arc_for_perturb: YES`). When a fresh trajectory is simulated for the
-perturbed state, the calculation is an ordinary two-state BAR — even though the column in
-`result.txt` is still labeled `FEP_XXX`.
-
-`YES` is much cheaper (no extra MD) and is appropriate for small parameter changes where the
-two states overlap well; `NO` is more robust for larger perturbations. Both modes are useful
-for sensitivity analysis and parameter optimization (see `utils/parmOPT.py`).
-
-## Parameter Optimization
-
-The `utils/parmOPT.py` utility optimizes force field parameters to simultaneously match experimental hydration free energy (HFE) and neat liquid density at one or more temperatures:
+## Testing
 
 ```bash
-python utils/parmOPT.py
+pytest
 ```
 
-It uses `scipy.optimize.least_squares` (TRF, soft-L1 loss) with a custom Jacobian. The HFE row is evaluated via autoBAR's one-step perturbation: each trial point writes a perturbed `<parameters>_01` file and runs `autoBAR.py auto`, so with `copy_arc_for_perturb: YES` (the recommended setting here) the HFE change is obtained by one-step FEP over the reference trajectory. Each density row uses the fluctuation formula (Wang et al. 2013, Eq. 4) applied to the most recent per-temperature trajectory, with all `$ANALYZE9` jobs submitted to the GPU cluster in parallel alongside the autoBAR HFE run.
+The suite runs without a cluster or a Tinker build: parsers are checked
+against real BAR output from a completed run, generated scripts are asserted
+against their exact expected command lines, and the optimizer's residual and
+Jacobian assembly is exercised with the simulation layer stubbed out.
 
-### Required settings
+---
 
-Add these fields to `settings.yaml` (copy `utils/settings.yaml` as a starting point):
+## Author
 
-```yaml
-# --- parmOPT required ---
-parameters: forcefield.prm               # Tinker parameter file
-expt_hfe: -4.75                          # Experimental HFE (kcal/mol)
-
-# Single-temperature density target (scalar form):
-temperature: 298.15                      # Simulation temperature (K)
-expt_density: 997.0                      # Experimental density in kg/m³
-                                         # NOTE: units are kg/m³ — water ≈ 997, ethanol ≈ 789
-
-liquid_dir: neat_liquid                  # Directory for neat-liquid MD (must NOT be "liquid"
-                                         # — autoBAR already uses ./liquid/ for HFE windows)
-production_time: 2.0                     # Production simulation time (ns)
-
-opt_params: "vdwpair-401-402 3.8 0.05"  # Force field term + initial parameter values
-params_range: "0.5 0.02"                # Search range (±) per parameter; use 0 to fix
-
-# --- Liquid MD settings (shared between HFE and neat-liquid simulations) ---
-liquid_md_time_step:  2.0               # Integration timestep (fs)
-liquid_md_write_freq: 0.1               # Trajectory output interval (ps)
-liquid_md_pressure:   1.0               # Pressure (atm)
-
-# --- parmOPT optional ---
-hfe_weight: 1.0                          # Relative importance weight for the HFE residual (default: 1.0)
-density_weight: 1.0                      # Relative importance weight for the density residual (default: 1.0)
-hfe_denom: 2.24                          # Scale denominator for HFE (kcal/mol).
-                                         # Default: sqrt(|expt_hfe|). Override to fix the normalization
-                                         # scale across multiple optimization runs.
-density_denom: 31.6                      # Scale denominator for density (kg/m³).
-                                         # Default: std-dev of expt_densities (multi-T) or
-                                         # sqrt(|expt_density|) (single-T). Override as needed.
-liquid_base: neat_liq                    # Coordinate/trajectory base name inside liquid_dir
-                                         # (default: "neat_liq"); sets xyz/key/sh/arc/dyn names
-liquid_key: neat_liq                     # Key file basename (default: same as liquid_base)
-equil_time: 0.5                          # Equilibration time (ns) — discarded before averaging (default: 0.02)
-hfe_liquid_key: path/to/liquid.key       # Override the HFE liquid key template used to auto-generate neat_liq.key
-                                         # (default: dat/liquid.key in the autoBAR repo)
-checking_time: 60                        # Polling interval (s) for MD and analyze job completion (default: 60)
-```
-
-### Weights and scale normalization
-
-The optimizer minimizes:
-
-```
-cost = (hfe_weight × ΔHFE / hfe_denom)² + Σ (density_weight_i × Δρ_i / density_denom)²
-```
-
-There are two separate knobs:
-
-| Knob | Purpose | Settings key |
-|------|---------|--------------|
-| **Denom** | Normalizes the physical scale of each property so residuals are dimensionless | `hfe_denom`, `density_denom` |
-| **Weight** | Controls the *relative importance* of HFE vs. density after normalization | `hfe_weight`, `density_weight` |
-
-#### Scale denominators (`hfe_denom`, `density_denom`)
-
-The denominator converts each raw residual (in its physical unit) into a dimensionless number. parmOPT computes sensible defaults automatically — the same convention used by ForceBalance:
-
-| Property | Default `Denom` | Rationale |
-|----------|-----------------|-----------|
-| HFE | `sqrt(\|expt_hfe\|)` | e.g. expt\_hfe = −5 kcal/mol → denom ≈ 2.24 kcal/mol |
-| Density (single T) | `sqrt(\|expt_density\|)` | e.g. expt\_density = 997 kg/m³ → denom ≈ 31.6 kg/m³ |
-| Density (multi T) | `std_dev(expt_densities)` | spread of the experimental values across temperatures |
-
-With these defaults a typical HFE error of ~1 kcal/mol and a typical density error of ~10 kg/m³ both produce a normalized residual of ~0.3–0.5, so `hfe_weight = density_weight = 1.0` gives a balanced starting point **without any manual tuning**.
-
-Override the defaults only when you want to lock the normalization scale across multiple runs (e.g. to make cost values comparable between different optimization attempts):
-
-```yaml
-hfe_denom: 2.24      # kcal/mol — fix at sqrt(5) regardless of expt_hfe
-density_denom: 31.6  # kg/m³   — fix at sqrt(997) regardless of expt_density
-```
-
-#### Relative importance weights (`hfe_weight`, `density_weight`)
-
-Once the denominators have put both residuals on the same scale, the weights express how much you care about one property relative to the other. With the default denominators, `hfe_weight = density_weight = 1.0` is a reasonable starting point for most organic solvents.
-
-Adjust when the optimization consistently sacrifices one property for the other:
-
-- If the optimizer fits HFE well but density drifts — increase `density_weight` (or decrease `hfe_weight`).
-- If density is well reproduced but HFE error is large — increase `hfe_weight`.
-- A factor-of-2 change in a weight shifts the cost ratio by 4×; start with small adjustments.
-
-The `WtNormRes` column in `parmOPT.log` shows `weight × Δ / denom` for each property at every optimizer step. Watch this column to see which property is driving the cost.
-
-**Practical starting point (works for most solvents):**
-
-```yaml
-# Let denom defaults handle unit normalization; use equal weights.
-hfe_weight: 1.0
-density_weight: 1.0
-```
-
-If you have a strong prior on acceptable errors you can also set weights as inverse acceptable errors *after* normalization. For example, if you want a 0.5 kcal/mol HFE error to cost the same as a 5 kg/m³ density error, and the defaults give `hfe_denom ≈ 2.24` and `density_denom ≈ 31.6`:
-
-```
-# normalized acceptable errors
-hfe_threshold   = 0.5 / 2.24 ≈ 0.22
-density_threshold = 5 / 31.6 ≈ 0.16
-
-# set weights so both thresholds give cost contribution ≈ 1
-hfe_weight     = 1 / 0.22 ≈ 4.5   → round to 5.0
-density_weight = 1 / 0.16 ≈ 6.3   → round to 6.0
-```
-
-### Multi-temperature density fitting
-
-Providing densities at multiple temperatures simultaneously constrains the parameter search and reduces overfitting.
-
-Replace the scalar `temperature` / `expt_density` keys with their list counterparts:
-
-```yaml
-# Replace these scalar keys:
-#   temperature: 298.15
-#   expt_density: 997.0
-
-# With these list keys (lengths must match):
-temperatures:    [278.15, 298.15, 318.15]  # temperatures in K
-expt_densities:  [999.9,  997.0,  989.3]   # experimental densities in kg/m³ at each T
-density_weights: [1.0,    1.0,    1.0]      # optional per-T weights; replaces density_weight
-```
-
-> **Important:** `expt_densities` values must be in **kg/m³**, not g/cm³.
-> Common reference values: water 278 K → 999.9, 298 K → 997.0, 318 K → 989.3 kg/m³.
-
-**Weight normalization:** each `density_weight` is divided by the number of temperatures internally, so the total density contribution to the cost is the same whether you fit at one temperature or ten. The user-specified weights control the *relative* importance of each temperature; the *aggregate* HFE/density balance is unchanged. The effective weights are printed to `parmOPT.log` at startup.
-
-autoBAR runs the HFE calculation once per optimizer call. Neat-liquid MD jobs are submitted to the GPU cluster in parallel with the HFE run: each temperature gets its own coordinate symlink, run script, and GPU card, so all temperatures run simultaneously. Before submitting, parmOPT checks the existing `.arc` file for each temperature — if it already contains the required number of frames (e.g., after a restart), the submission is skipped; if the run is partial and a `.dyn` checkpoint exists, a resume script is generated with only the remaining steps. parmOPT waits for the HFE job and all neat-liquid MD jobs to finish before moving to the next optimizer step.
-
-For the Jacobian, parmOPT first strips the equilibration frames from each trajectory, writing a `*-prod.arc` file containing only production snapshots. It then writes one `$ANALYZE9` run script per (parameter perturbation, temperature) pair, submits all scripts to the GPU cluster simultaneously via `submitTinker.py`, and waits for all output logs before assembling the density sensitivity rows of the Jacobian.
-
-### Optimizing multiple parameter groups
-
-`opt_params` and `params_range` accept either a single string (one group) or a YAML list (multiple groups). Each list entry is one independent force-field term; all groups are optimized simultaneously.
-
-```yaml
-opt_params:
-  - "vdw-401    3.80 0.050"   # R and epsilon on atom type 401
-  - "vdw-402    3.60 0.060"   # R and epsilon on atom type 402
-  - "chgpen-403 5.00 0.800"   # two chgpen parameters on atom type 403
-params_range:
-  - "0.30 0.02"
-  - "0.30 0.02"
-  - "0.50 0.05"
-```
-
-The optimizer sees a single flat parameter vector formed by concatenating the free parameters from all groups; `write_prm` splits it back and writes one line per group.
-
-### Fixing individual parameters
-
-Use `0` in `params_range` to hold a parameter constant. That parameter is excluded from the optimizer but still written to the parameter file at its initial value:
-
-```yaml
-# Optimize R only; keep epsilon fixed at 0.050
-opt_params:   "vdw-401 3.80 0.050"
-params_range: "0.30 0"
-```
-
-This works for both the single-string and list forms:
-
-```yaml
-opt_params:
-  - "vdw-401    3.80 0.050"   # optimize R only
-  - "chgpen-403 5.00 0.800"   # optimize both params
-params_range:
-  - "0.30 0"      # 0 → epsilon is fixed
-  - "0.50 0.05"
-```
-
-Fixed parameters are annotated as `(fixed)` in each step's log line in `parmOPT.log`.
-
-### Neat-liquid directory layout
-
-> **Important:** set `liquid_dir` to a name other than `liquid` (e.g., `neat_liquid`).
-> autoBAR creates `./liquid/` and `./gas/` for the HFE alchemical windows; a conflicting
-> `liquid_dir: liquid` would mix those files with the pure-liquid MD trajectories.
-
-The only file you need to supply in `liquid_dir` is the Tinker coordinate file.
-The key and per-temperature shell scripts are auto-generated at startup:
-
-| File | Source | Description |
-|------|--------|-------------|
-| `neat_liq.xyz` | **User-supplied** | Simulation box Tinker coordinates |
-| `neat_liq.key` | Auto-generated (if absent) | Derived from the HFE liquid key template by removing `vdw-annihilate`, `vdw-lambda`, `ele-lambda`, and `ligand` lines; shared by all temperatures |
-| `neat_liq_{T}K.xyz` | Auto-generated (symlink) | Per-temperature symlink → `neat_liq.xyz`; Tinker writes `neat_liq_{T}K.arc` so parallel GPU runs don't overwrite each other |
-| `neat_liq_{T}K.key` | Auto-generated (symlink) | Per-temperature symlink → `neat_liq.key`; ensures Tinker names its output after the temperature-tagged coordinate file |
-| `neat_liq_{T}K.sh` | Auto-generated (always) | Per-temperature NPT run script (sources `dat/tinker.env`, calls `$DYNAMIC9`); each is submitted to a separate GPU card |
-
-Example directory after a two-temperature run at 278 K and 298 K with Jacobian computed:
-```
-neat_liquid/
-├── neat_liq.xyz                        # user-supplied
-├── neat_liq.key                        # shared key file (PARAMETERS updated each opt step)
-├── neat_liq_278K.xyz                   # symlink → neat_liq.xyz
-├── neat_liq_278K.key                   # symlink → neat_liq.key
-├── neat_liq_278K.sh                    # MD run script for 278 K
-├── neat_liq_278K-md.log                # MD log
-├── neat_liq_278K.arc                   # full trajectory (equil + production)
-├── neat_liq_278K.dyn                   # MD checkpoint for resume
-├── neat_liq_278K-prod.arc              # production-only arc (equil frames stripped)
-├── neat_liq_278K-prm01.key             # analyze key: prm perturb +Δ, 278 K
-├── neat_liq_278K-prm01-analyze.sh      # analyze script for above
-├── neat_liq_278K-prm01-analyze.log     # ANALYZE9 output
-├── neat_liq_298K.xyz                   # symlink → neat_liq.xyz
-├── neat_liq_298K.key                   # symlink → neat_liq.key
-├── neat_liq_298K.sh                    # MD run script for 298 K
-├── neat_liq_298K-md.log                # MD log
-├── neat_liq_298K.arc                   # full trajectory
-├── neat_liq_298K.dyn                   # MD checkpoint
-├── neat_liq_298K-prod.arc              # production-only arc
-├── neat_liq_298K-prm01.key             # analyze key: prm perturb +Δ, 298 K
-├── neat_liq_298K-prm01-analyze.sh      # analyze script for above
-└── neat_liq_298K-prm01-analyze.log     # ANALYZE9 output
-```
-
-> For `N` free parameters, `2N` parameter perturbations are created per optimizer call; the analyze files are labeled `prm01` … `prm{2N}` and all submitted to the cluster simultaneously.
-
-## Recommended Minimal Settings
-
-For hydration free energy calculations:
-
-| Setting | Value | Notes |
-|---------|-------|-------|
-| `lambda_window` | `courser` | 18 windows — good accuracy with less cost |
-| `liquid_md_total_time` | 1.25 ns | Last 80% (1 ns) used in BAR analysis |
-| `liquid_md_time_step` | 2.0 fs | Works well with RESPA integrator |
-| `gas_md_total_time` | 1.25 ns | Last 80% (1 ns) used in BAR analysis |
-| `gas_md_time_step` | 0.1 fs | Required for gas-phase stochastic dynamics |
+Chengwen Liu — liuchw2010@gmail.com

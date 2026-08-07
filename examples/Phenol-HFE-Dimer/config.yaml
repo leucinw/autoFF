@@ -1,0 +1,64 @@
+# =============================================================================
+# Parameter optimization against two targets: hydration free energy and a
+# dimer interaction energy. The neat-liquid density target is left out.
+#
+#   autoff run config.yaml
+#
+# Fits the van der Waals radius and well depth of the phenol hydroxyl oxygen
+# (class 36) so that both targets are reproduced as well as one parameter pair
+# allows.
+# =============================================================================
+
+workdir: .
+
+shared:
+  parameters: input/amoeba09.prm
+  checking_time: 120.0
+
+  md_defaults:
+    liquid:
+      total_time: 0.5
+      time_step: 2.0
+      write_freq: 1.0
+      ensemble: NPT
+      temperature: 300.0
+      pressure: 1.0
+    gas:
+      total_time: 0.5
+      time_step: 0.1
+      write_freq: 1.0
+      temperature: 300.0
+
+  node_list:
+
+hfe_systems:
+  - name: phenol
+    gas_xyz: input/phenol.xyz
+    box_xyz: input/phenol_solv.xyz
+    expt: -6.62                  # experimental phenol HFE, kcal/mol
+    weight: 1.0
+    lambda_window: courser
+    copy_arc_for_perturb: true   # reweight the coupled-state trajectory
+    # denom: 2.57                # overrides the default sqrt(|expt|)
+
+# E_int = E_dimer - E_mon1 - E_mon2 from Tinker `analyze E`, against a QM value.
+#
+# NOTE: input/dimers/phenol_water.xyz is a CONSTRUCTED starting geometry
+# (H-bond ~1.9 A, not QM-optimized) and the -6.9 reference below is an
+# ILLUSTRATIVE placeholder. Replace both with your own QM-optimized geometry
+# and reference energy before drawing conclusions from a fit.
+dimers:
+  - name: phenol_water
+    xyz: input/dimers/phenol_water.xyz
+    frag1_natoms: 13             # first 13 atoms are phenol; the rest is water
+    expt: -6.9                   # QM interaction energy, kcal/mol
+    weight: 1.0
+
+job:
+  type: optimize
+  optimize:
+    # "<term_key> <value1> <value2> ..." with a matching range string.
+    # A range of 0 pins that value: written unchanged, hidden from the fit.
+    opt_params:   ["vdw-36 3.4050 0.1100"]
+    params_range: ["0.20   0.05"]     # +/- 0.20 A on R, +/- 0.05 on epsilon
+    diff_step: 0.0001

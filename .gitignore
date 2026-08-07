@@ -2,3 +2,11 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Run outputs produced inside example directories
+examples/*/prm/
+examples/*/systems/
+examples/*/results/

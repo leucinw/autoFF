@@ -1,0 +1,48 @@
+# =============================================================================
+# Single-point hydration free energy of a monatomic ion (Na+).
+#
+#   autoff run config.yaml
+#
+# Sodium has no intramolecular degrees of freedom, so autoff detects the
+# small solute and disables the gas-phase leg automatically: only the
+# condensed-phase decoupling is simulated.
+# =============================================================================
+
+workdir: .
+
+shared:
+  parameters: input/water03.prm
+  checking_time: 120.0
+
+  md_defaults:
+    liquid:
+      total_time: 0.1                 # ns
+      time_step: 2.0                  # fs
+      write_freq: 1.0                 # ps
+      ensemble: NPT
+      temperature: 300.0              # K
+      pressure: 1.0                   # atm
+    gas:
+      total_time: 0.1
+      time_step: 0.1
+      write_freq: 1.0
+      temperature: 300.0
+
+  node_list:
+    - node194
+    - node195
+    - node210
+    - node211
+    - node212
+    - node215
+
+hfe_systems:
+  - name: sodium
+    gas_xyz: input/Na.xyz
+    box_xyz: input/Na-water.xyz
+    expt: -88.7                       # kcal/mol
+    lambda_window: courser
+    copy_arc_for_perturb: true
+
+job:
+  type: single-point

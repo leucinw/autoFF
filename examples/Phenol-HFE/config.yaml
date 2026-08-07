@@ -1,0 +1,47 @@
+# =============================================================================
+# Single-point hydration free energy of one solute (phenol).
+#
+#   autoff run config.yaml
+#   autoff run config.yaml --dry-run    # generate all inputs, submit nothing
+# =============================================================================
+
+workdir: .
+
+shared:
+  parameters: input/amoeba09.prm      # force field shared by every system
+  checking_time: 120.0                # seconds between completeness polls
+
+  md_defaults:
+    liquid:
+      total_time: 0.5                 # ns
+      time_step: 2.0                  # fs
+      write_freq: 1.0                 # ps
+      ensemble: NPT
+      temperature: 300.0              # K
+      pressure: 1.0                   # atm
+    gas:
+      total_time: 0.5                 # ns
+      time_step: 0.1                  # fs
+      write_freq: 1.0                 # ps
+      temperature: 300.0              # K
+
+  # Cluster nodes to spread jobs across (Ren Lab clusters). Omit or leave
+  # empty to fall back to the site-wide node file.
+  node_list:
+    - node103
+    - node104
+    - node105
+    - node194
+    - node195
+    - node215
+
+hfe_systems:
+  - name: phenol
+    gas_xyz: input/phenol.xyz         # solute alone
+    box_xyz: input/phenol_solv.xyz    # solute in a water box (with box line)
+    expt: -6.62                       # experimental HFE, kcal/mol
+    lambda_window: courser            # courser | default | path/to/schedule
+    copy_arc_for_perturb: true
+
+job:
+  type: single-point
