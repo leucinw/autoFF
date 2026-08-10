@@ -217,12 +217,36 @@ class Runner:
             analyze_logs[liquid.name] = log_map
             jobs.extend(liquid_jobs)
 
-        for system in self.hfe_systems:
-            jobs.extend(system.bar_jobs())
         self.dispatcher.submit(jobs)
 
         if self.dry_run:
+            # Nothing will ever complete, so also emit the BAR scripts that a
+            # real run would produce once dynamics finished.
+            bar_jobs = []
+            for system in self.hfe_systems:
+                bar_jobs.extend(system.bar_jobs())
+            self.dispatcher.submit(bar_jobs)
             return {}, {}
+
+        # Every BAR window reads two full trajectories, so none may be
+        # submitted while any dynamics are still writing. Batching them
+        # together lets the dispatcher start a BAR against a half-written
+        # .arc: the resulting .bar is truncated on one side, its .ene comes
+        # out as NaN and never converges, and the wait loop below then blocks
+        # forever because it only polls and never resubmits.
+        while True:
+            running = [s.name for s in self.hfe_systems if not s.md_complete()]
+            if not running:
+                break
+            log.info("Gradient: holding BAR, MD still running on %d system(s): %s",
+                     len(running), ", ".join(running))
+            time.sleep(self.cfg.checking_time)
+
+        bar_jobs = []
+        for system in self.hfe_systems:
+            bar_jobs.extend(system.bar_jobs())
+        log.info("Gradient: MD complete; submitting %d BAR job(s)", len(bar_jobs))
+        self.dispatcher.submit(bar_jobs)
 
         pending = {s.name: ('hfe', s) for s in self.hfe_systems}
         pending.update({q.name: ('liquid', q) for q in self.liquids})

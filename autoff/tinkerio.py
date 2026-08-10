@@ -175,14 +175,54 @@ def ene_complete(enepath):
     return any("BAR Estimate of -T*dS" in line for line in read_last_lines(enepath))
 
 
-def bar_file_snapshot_count(barpath):
-    """Return the snapshot count from the first line of a .bar file, or 0."""
+def md_crash_reason(logpath, errpath):
+    """Return why a Tinker MD run died, or None if there is no sign of a crash.
+
+    A dynamics run that blows up ends its log with Tinker's uncaught-exception
+    line and dumps the offending coordinates to a .err file. Either is proof
+    that the run is over and no further frames are coming, which is the
+    difference between a trajectory that is merely slow and one that will never
+    finish -- a distinction a frame count alone cannot make.
+    """
+    if os.path.isfile(logpath):
+        for line in read_last_lines(logpath):
+            if "Terminating with uncaught exception" in line:
+                return line.split(':', 1)[-1].strip() or line.strip()
+    if os.path.isfile(errpath):
+        return f"coordinates dumped to {os.path.basename(errpath)}"
+    return None
+
+
+def bar_file_snapshot_counts(barpath):
+    """Return both trajectory lengths recorded in a .bar file, or (0, 0).
+
+    A .bar holds one block per state, each introduced by a header line whose
+    first field is that state's snapshot count::
+
+        <n0>  <temperature>  <title>
+        ... n0 energy rows ...
+        <n1>  <temperature>  <title>
+        ... n1 energy rows ...
+
+    Both counts matter. A BAR started while the second state's trajectory was
+    still being written produces a full first block and a truncated second one,
+    so checking only the header of the file misses the failure: BAR then
+    evaluates its snapshot range against frames that do not exist and writes an
+    .ene of NaN that never converges.
+    """
     try:
         with open(barpath) as f:
             parts = f.readline().split()
-            return int(parts[0]) if parts else 0
+            if not parts:
+                return 0, 0
+            n0 = int(parts[0])
+            for _ in range(n0):          # skip the first block's energy rows
+                if not f.readline():
+                    return n0, 0
+            parts = f.readline().split()
+            return n0, (int(parts[0]) if parts else 0)
     except (IOError, ValueError):
-        return 0
+        return 0, 0
 
 
 def bar_sh_steps_match(shpath, expected_start, expected_total):

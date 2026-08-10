@@ -106,6 +106,45 @@ def test_perturbed_windows_reuse_the_coupled_trajectory(phenol_runner):
     assert 'amoeba09.prm_01' in key
 
 
+def _bar_text(n0, n1):
+    row = "       1         -100.0000       -100.0001        46854.9375\n"
+    return (f"{n0:8d}    298.15  title\n" + row * n0 +
+            f"{n1:8d}    298.15  title\n" + row * n1)
+
+
+def test_stale_bar_dropped_when_second_state_truncated(phenol_runner):
+    """A BAR that ran against a half-written trajectory must not be trusted.
+
+    Its .ene is all NaN and never converges, so leaving the pair in place
+    stalls the run forever; removing it lets the window be rebuilt.
+    """
+    _, runner = phenol_runner
+    system = runner.hfe_systems[0]
+    w = next(iter(system._window_pairs('liquid')))
+    total, start = w['total'], w['start']
+
+    barpath = os.path.join(w['bardir'], w['stem'] + '.bar')
+    enepath = os.path.join(w['bardir'], w['stem'] + '.ene')
+    shpath = os.path.join(w['bardir'], w['sh_name'])
+    with open(shpath, 'w') as f:
+        f.write(f"$BAR9 2 x.bar {start} {total} 1 {start} {total} 1 > x.ene\n")
+
+    # Both states complete: kept.
+    with open(barpath, 'w') as f:
+        f.write(_bar_text(total, total))
+    with open(enepath, 'w') as f:
+        f.write(' BAR Estimate of -T*dS   0.01 Kcal/mol\n')
+    system._drop_stale_bar(w, barpath, enepath, shpath)
+    assert os.path.isfile(barpath) and os.path.isfile(enepath)
+
+    # Second state short: both files go, even though the header says total.
+    with open(barpath, 'w') as f:
+        f.write(_bar_text(total, 45))
+    system._drop_stale_bar(w, barpath, enepath, shpath)
+    assert not os.path.isfile(barpath)
+    assert not os.path.isfile(enepath)
+
+
 def test_collect_reproduces_original_result(example_run, fixtures_dir):
     run = example_run('Ion-HFE')
     liquid_dir = run / 'systems' / 'sodium' / 'liquid'

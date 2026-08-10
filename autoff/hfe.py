@@ -399,9 +399,13 @@ class HFESystem:
                 not tinkerio.bar_sh_steps_match(shpath, w['start'], w['total']):
             reason = "snapshot range changed"
         elif os.path.isfile(barpath):
-            count = tinkerio.bar_file_snapshot_count(barpath)
-            if count != w['total']:
-                reason = f"built from {count} snapshots, expected {w['total']}"
+            # Both states must be full length: a BAR that ran against a
+            # trajectory still being written leaves the second block short,
+            # and its .ene comes out as NaN that no amount of waiting fixes.
+            counts = tinkerio.bar_file_snapshot_counts(barpath)
+            if counts != (w['total'], w['total']):
+                states = " and ".join(str(c) for c in counts)
+                reason = f"built from {states} snapshots, expected {w['total']} each"
         if reason:
             log.warning("[%s] %s: %s; removing stale .bar/.ene",
                         self.name, w['stem'], reason)

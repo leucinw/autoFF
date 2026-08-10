@@ -91,6 +91,50 @@ def test_md_jobs_fresh_discards_old_trajectory(water_runner):
     assert not arc.exists()
 
 
+CRASH_LOG = (" Molecular Dynamics Trajectory via r-RESPA MTS Algorithm\n"
+             " Terminating with uncaught exception :  INDUCE  --  Warning, "
+             "Induced Dipoles are not Converged\n")
+
+
+def test_md_complete_raises_when_dynamics_died(water_runner, monkeypatch):
+    """A crashed run must not read as 'still going': nothing resubmits it."""
+    _, liquid = water_runner
+    monkeypatch.setattr(tinkerio, 'count_arc_frames', lambda p: 0)
+
+    # Short trajectory with a healthy log: the run is simply not finished yet.
+    for T in liquid.cfg.temperatures:
+        with open(liquid.log_path(T), 'w') as f:
+            f.write(_md_log(3))
+    assert liquid.md_complete() is False
+
+    # Same frame count, but the dynamics blew up at one temperature.
+    T = liquid.cfg.temperatures[0]
+    with open(liquid.log_path(T), 'w') as f:
+        f.write(CRASH_LOG)
+    with pytest.raises(RuntimeError, match="Induced Dipoles are not Converged"):
+        liquid.md_complete()
+
+    # A coordinate dump alone is enough, even with nothing wrong in the log.
+    with open(liquid.log_path(T), 'w') as f:
+        f.write(_md_log(3))
+    open(liquid.err_path(T), 'w').close()
+    with pytest.raises(RuntimeError, match=r"\.err"):
+        liquid.md_complete()
+
+
+def test_md_jobs_clear_the_previous_crash_dump(water_runner, monkeypatch):
+    """Resubmitting must not inherit the last run's .err, or it looks crashed."""
+    _, liquid = water_runner
+    monkeypatch.setattr(tinkerio, 'count_arc_frames', lambda p: 0)
+    for T in liquid.cfg.temperatures:
+        open(liquid.err_path(T), 'w').close()
+
+    assert len(liquid.md_jobs(fresh=True)) == 2
+    assert not any(os.path.isfile(liquid.err_path(T)) for T in liquid.cfg.temperatures)
+    # With the dumps gone the fresh run reads as pending again, not crashed
+    assert liquid.md_complete() is False
+
+
 def test_densities_from_log(water_runner):
     run, liquid = water_runner
     n_equil, n_prod = liquid.cfg.n_equil, liquid.cfg.n_production

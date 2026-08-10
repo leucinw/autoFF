@@ -50,6 +50,56 @@ def test_bar_sh_steps_match(tmp_path):
     assert not tinkerio.bar_sh_steps_match(str(tmp_path / 'missing.sh'), 101, 500)
 
 
+def test_md_crash_reason(tmp_path):
+    logp, errp = tmp_path / 'md.log', tmp_path / 'md.err'
+    logp.write_text(" Frame Number    12\n Current Potential   -100.0\n")
+    assert tinkerio.md_crash_reason(str(logp), str(errp)) is None
+
+    logp.write_text(" Molecular Dynamics Trajectory via r-RESPA MTS Algorithm\n"
+                    " Terminating with uncaught exception :  INDUCE  --  Warning, "
+                    "Induced Dipoles are not Converged at pcg.cu:172\n")
+    assert 'Induced Dipoles are not Converged' in \
+        tinkerio.md_crash_reason(str(logp), str(errp))
+
+    # Tinker dumps coordinates even when the log says nothing useful
+    logp.write_text(" Frame Number    12\n")
+    errp.write_text('  4431\n')
+    assert 'md.err' in tinkerio.md_crash_reason(str(logp), str(errp))
+
+    # Neither file present: a run that has not started is not a crash
+    assert tinkerio.md_crash_reason(str(tmp_path / 'no.log'),
+                                    str(tmp_path / 'no.err')) is None
+
+
+def _write_bar(path, n0, n1):
+    """A .bar with n0 rows in the first block and n1 in the second."""
+    row = "       1         -100.0000       -100.0001        46854.9375\n"
+    path.write_text(f"{n0:8d}    298.15  Built with Packmol\n" + row * n0 +
+                    f"{n1:8d}    298.15  Built with Packmol\n" + row * n1)
+
+
+def test_bar_file_snapshot_counts(tmp_path):
+    bar = tmp_path / 'full.bar'
+    _write_bar(bar, 500, 500)
+    assert tinkerio.bar_file_snapshot_counts(str(bar)) == (500, 500)
+
+    # A BAR run against a trajectory that was still being written: the first
+    # state is complete but the second only got 45 frames in.
+    truncated = tmp_path / 'truncated.bar'
+    _write_bar(truncated, 500, 45)
+    assert tinkerio.bar_file_snapshot_counts(str(truncated)) == (500, 45)
+
+    # Cut off before the second block starts at all
+    partial = tmp_path / 'partial.bar'
+    partial.write_text("     500    298.15  title\n" + "  1  -1.0  -1.0  1.0\n" * 12)
+    assert tinkerio.bar_file_snapshot_counts(str(partial)) == (500, 0)
+
+    assert tinkerio.bar_file_snapshot_counts(str(tmp_path / 'nope.bar')) == (0, 0)
+    empty = tmp_path / 'empty.bar'
+    empty.write_text('')
+    assert tinkerio.bar_file_snapshot_counts(str(empty)) == (0, 0)
+
+
 def test_count_arc_frames(tmp_path):
     # NPT stride is n_atoms + 2: header, box line, then coordinates
     arc = tmp_path / 'traj.arc'

@@ -111,6 +111,45 @@ class Optimizer:
     def _is_initial(self, params):
         return np.array_equal(np.asarray(params), self.spec.initial)
 
+    def _step_bounds(self):
+        """The configured bounds, narrowed to a relative box around the start.
+
+        ``params_range`` is written in absolute units, so it hands out very
+        uneven freedom: a range of 0.15 on an rmin of 4.19 is 4%, while 0.02 on
+        a well depth of 0.0217 lets it fall to 0.0017. A well depth near zero
+        removes the repulsion that keeps induced dipoles finite, so the fit
+        does not come back with a bad density -- the dynamics diverge and the
+        step yields nothing at all. Capping the relative move keeps every
+        parameter somewhere the simulations can still be integrated.
+        """
+        x0 = np.asarray(self.spec.initial, dtype=float)
+        lower = np.asarray(self.spec.lower, dtype=float)
+        upper = np.asarray(self.spec.upper, dtype=float)
+        max_step = self.cfg.optimize.max_step
+        if max_step <= 0:
+            return lower, upper
+        # A parameter sitting at zero has no relative scale to cap; leave it be.
+        room = max_step * np.abs(x0)
+        capped = room > 0
+        lower = np.where(capped, np.maximum(lower, x0 - room), lower)
+        upper = np.where(capped, np.minimum(upper, x0 + room), upper)
+        return lower, upper
+
+    def _x_scale(self):
+        """Characteristic size of each parameter, for the trust region.
+
+        least_squares measures its trust region in units of ``x_scale``. Left
+        at 1 the region is absolute, so it is sized by the largest parameters
+        in the vector -- here rmin and chgpen values of 3-7 -- and a step that
+        nudges those moves a well depth of 0.02 by its whole magnitude. Scaling
+        by each parameter's own size makes the region relative, so every
+        parameter moves by a comparable fraction of itself.
+        """
+        x0 = np.abs(np.asarray(self.spec.initial, dtype=float))
+        span = np.asarray(self.spec.upper) - np.asarray(self.spec.lower)
+        scale = np.where(x0 > 0, x0, span)
+        return np.where(scale > 0, scale, 1.0)
+
     def _write_params(self, params, path):
         return self.param_file.write(path, self.spec.render_lines(params))
 
@@ -249,7 +288,8 @@ class Optimizer:
         self.param_file.cleanup_sidecars(self.cfg.systems_dir)
         self.param_file.restore()
 
-        self._log_settings()
+        lower, upper = self._step_bounds()
+        self._log_settings(lower, upper)
 
         result = least_squares(
             fun=self.model_func,
@@ -258,7 +298,8 @@ class Optimizer:
             loss='soft_l1',
             method='trf',
             verbose=2,
-            bounds=(self.spec.lower, self.spec.upper),
+            bounds=(lower, upper),
+            x_scale=self._x_scale(),
             ftol=self.cfg.optimize.ftol,
             gtol=self.cfg.optimize.gtol,
             xtol=self.cfg.optimize.xtol,
@@ -274,17 +315,23 @@ class Optimizer:
         log.info("Optimized parameters written to %s", final)
         return result
 
-    def _log_settings(self):
+    def _log_settings(self, lower, upper):
         log.info("=== Optimization settings ===")
         log.info("diff_step: %g", self.diff_step)
+        max_step = self.cfg.optimize.max_step
+        log.info("max_step: %s", f"{max_step:g} of each starting value"
+                 if max_step > 0 else "disabled (params_range only)")
         log.info("parameter groups (%d):", len(self.spec.entries))
         for e in self.spec.entries:
             parts, fi = [], 0
             for p, is_free in zip(e.all_params, e.free_mask):
                 if is_free:
-                    lo = self.spec.lower[e.free_start + fi]
-                    hi = self.spec.upper[e.free_start + fi]
-                    parts.append(f"{p:.6g} [{lo:.6g}, {hi:.6g}]")
+                    i = e.free_start + fi
+                    # Flag the bounds max_step tightened, so it is visible when
+                    # a fit stops moving because of the cap rather than the data
+                    tight = '*' if (lower[i] > self.spec.lower[i]
+                                    or upper[i] < self.spec.upper[i]) else ''
+                    parts.append(f"{p:.6g} [{lower[i]:.6g}, {upper[i]:.6g}]{tight}")
                     fi += 1
                 else:
                     parts.append(f"{p:.6g}(fixed)")

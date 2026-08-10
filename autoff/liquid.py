@@ -57,6 +57,10 @@ class NeatLiquidSystem:
     def log_path(self, T):
         return os.path.join(self.dir, f"{self._base(T)}.log")
 
+    def err_path(self, T):
+        """Where Tinker dumps coordinates when dynamics blow up."""
+        return os.path.join(self.dir, f"{self._base(T)}.err")
+
     # -- setup ------------------------------------------------------------
 
     def setup(self, dry_run=False):
@@ -146,6 +150,7 @@ class NeatLiquidSystem:
                 Path(arc).unlink(missing_ok=True)
                 Path(dyn).unlink(missing_ok=True)
                 Path(self.log_path(T)).unlink(missing_ok=True)
+                self._clear_crash(T)
                 self._write_md_script(T)
                 jobs.append(self._job(sh_name, T))
                 continue
@@ -159,28 +164,58 @@ class NeatLiquidSystem:
                 remaining = (n_total - n_done) * c.steps_per_frame
                 log.info("[%s] T=%.1fK: resuming, %d/%d frames done, %d steps left",
                          self.name, T, n_done, n_total, remaining)
+                self._clear_crash(T)
                 # Append to the log so densities from the earlier segment survive
                 resume_sh = self._write_md_script(T, remaining_steps=remaining,
                                                   append_log=True, suffix='-resume')
                 jobs.append(self._job(resume_sh, T))
             else:
                 log.info("[%s] T=%.1fK: starting fresh MD", self.name, T)
+                self._clear_crash(T)
                 self._write_md_script(T)
                 jobs.append(self._job(sh_name, T))
         return jobs
+
+    def _clear_crash(self, T):
+        """Drop the previous run's crash dump before launching a new one.
+
+        Whether a .err file means anything depends on which run wrote it, so
+        every submission starts from a clean slate: afterwards its presence
+        can only describe the run that is current.
+        """
+        Path(self.err_path(T)).unlink(missing_ok=True)
 
     def _job(self, sh_name, T):
         return Job(script=sh_name, workdir=self.dir, queue='GPU', nproc=2,
                    label=f"{self.name}@{T:.0f}K md")
 
     def md_complete(self):
-        """True once every temperature has a full-length trajectory."""
+        """True once every temperature has a full-length trajectory.
+
+        Raises RuntimeError if a trajectory stopped short because its dynamics
+        died. Nothing in this pipeline resubmits, so a crashed run left to the
+        frame count alone reads as "still going" forever; the caller polls a
+        counter that will never move again and the whole fit hangs in silence.
+        """
         n_total = self.cfg.n_equil + self.cfg.n_production
-        pending = []
+        pending, crashed = [], []
         for T in self.cfg.temperatures:
             n_done = tinkerio.count_arc_frames(self.arc_path(T))
-            if n_done < n_total:
+            if n_done >= n_total:
+                continue
+            reason = tinkerio.md_crash_reason(self.log_path(T), self.err_path(T))
+            if reason:
+                crashed.append(f"T={T:.0f}K ({n_done}/{n_total} frames): {reason}")
+            else:
                 pending.append(f"T={T:.0f}K ({n_done}/{n_total})")
+
+        if crashed:
+            raise RuntimeError(
+                f"[{self.name}] MD died at {len(crashed)} temperature(s) and will "
+                f"not finish on its own:\n  " + "\n  ".join(crashed) +
+                f"\nInspect the logs in {self.dir}. A polarization or integration "
+                f"failure usually means the current parameters are unphysical."
+            )
         if pending:
             log.info("[%s] waiting on MD: %s", self.name, ", ".join(pending))
             return False

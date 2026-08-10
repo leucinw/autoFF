@@ -194,6 +194,12 @@ class OptimizeConfig:
     ftol: float = 1e-4
     gtol: float = 1e-4
     xtol: float = 1e-4
+    # Largest fractional move any one parameter may make away from its starting
+    # value, applied on top of params_range. Those ranges are absolute and so
+    # grant very uneven freedom -- 0.15 on an rmin near 4.2 is 4%, while 0.02 on
+    # a well depth of 0.0217 is 92% -- and it is the loose ones that let a fit
+    # walk into parameters no MD can integrate. 0 disables the cap.
+    max_step: float = 0.25
 
 
 @dataclass
@@ -538,6 +544,9 @@ def _parse_optimize(job, n_free_hint=None):
             f"opt_params has {len(raw_params)} entry(ies) but params_range has "
             f"{len(raw_range)}; they must match"
         )
+    max_step = float(opt.get('max_step', 0.25))
+    if max_step < 0:
+        raise ConfigError(f"job.optimize.max_step must be >= 0, got {max_step}")
     return OptimizeConfig(
         opt_params=[str(p) for p in raw_params],
         params_range=[str(r) for r in raw_range],
@@ -545,6 +554,7 @@ def _parse_optimize(job, n_free_hint=None):
         ftol=float(opt.get('ftol', 1e-4)),
         gtol=float(opt.get('gtol', 1e-4)),
         xtol=float(opt.get('xtol', 1e-4)),
+        max_step=max_step,
     )
 
 

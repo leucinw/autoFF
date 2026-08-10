@@ -203,6 +203,51 @@ def test_dimer_only_fit_needs_no_cluster(example_run, monkeypatch):
     assert J.shape == (1, 2)
 
 
+def test_max_step_caps_the_loosely_bounded_parameters(multi_optimizer):
+    """params_range is absolute, so it frees a small epsilon far more than an
+    rmin with a similar range. max_step evens that out, without touching the
+    parameters that were already held tight."""
+    _, opt = multi_optimizer
+    opt.cfg.optimize.max_step = 0.25
+    lower, upper = opt._step_bounds()
+
+    # rmin 3.4050 +/- 0.15 is only 4% wide: well inside the 25% cap, so it stays
+    assert lower[0] == pytest.approx(3.2550)
+    assert upper[0] == pytest.approx(3.5550)
+    # epsilon 0.1100 +/- 0.04 is 36% wide, and gets pulled back to 25%
+    assert lower[1] == pytest.approx(0.1100 * 0.75)
+    assert upper[1] == pytest.approx(0.1100 * 1.25)
+
+
+def test_settings_banner_marks_the_capped_bounds(multi_optimizer, caplog):
+    """A fit that stalls on the cap rather than on the data should be able to
+    say so from the log alone."""
+    _, opt = multi_optimizer
+    opt.cfg.optimize.max_step = 0.25
+    with caplog.at_level('INFO'):
+        opt._log_settings(*opt._step_bounds())
+    banner = caplog.text
+    assert 'max_step: 0.25 of each starting value' in banner
+    # rmin keeps its configured bounds, epsilon is flagged as narrowed
+    assert '3.405 [3.255, 3.555],' in banner
+    assert '0.11 [0.0825, 0.1375]*' in banner
+
+
+def test_max_step_zero_leaves_configured_bounds_alone(multi_optimizer):
+    _, opt = multi_optimizer
+    opt.cfg.optimize.max_step = 0.0
+    lower, upper = opt._step_bounds()
+    assert lower == pytest.approx(opt.spec.lower)
+    assert upper == pytest.approx(opt.spec.upper)
+
+
+def test_x_scale_follows_parameter_magnitude(multi_optimizer):
+    """An absolute trust region is sized by rmin, and would move an epsilon
+    thirty times smaller by its whole value in one step."""
+    _, opt = multi_optimizer
+    assert opt._x_scale() == pytest.approx([3.4050, 0.1100])
+
+
 def _first_value(prm_path):
     """Read back the first fitted value from a written parameter file."""
     with open(prm_path) as f:
