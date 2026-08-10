@@ -35,7 +35,10 @@ NODE_LIST_FILE = "/home/liuchw/bin/TinkerGPU2022/nodes.dat"
 PYSCF_NODE_FILE = "/home/liuchw/bin/pyscf_node"
 
 CPU_USAGE_LIMIT = 0.6          # only use 60 % of a node's cores
-SSH_TIMEOUT = 10.0             # seconds
+SSH_TIMEOUT = 10.0             # seconds, for the whole probe
+# Kept well under SSH_TIMEOUT so a node that is down is written off on the
+# connect rather than eating the budget the live ones need to answer.
+SSH_CONNECT_TIMEOUT = 5.0      # seconds
 CPU_SETTLE_TIME = 15.0         # wait after CPU submission round
 GPU_SETTLE_TIME = 30.0         # wait after GPU submission round
 RETRY_INTERVAL = 5.0           # wait between retry rounds
@@ -87,14 +90,27 @@ def ssh_output(node, remote_cmd, timeout=SSH_TIMEOUT):
 
     Returns an empty list (never raises) so callers can treat a
     failed / unreachable node the same as an idle one.
+
+    ssh is exec'd directly rather than through a local shell. A shell would
+    re-import every exported shell function in the environment as it starts --
+    module, ml, switchml, scl, which -- and any one of them that arrives with
+    a truncated body makes it print two parse errors onto stderr. That noise
+    rides along on every probe but only surfaces on the ones that fail, since
+    failure is the only branch that logs stderr, which buries the one line
+    that matters under a wall of shell errors. Skipping the shell also spares
+    *remote_cmd* a round of local quoting, so its redirections reach the
+    remote shell intact.
     """
-    cmd = f'ssh -o StrictHostKeyChecking=no {node} "{remote_cmd}"'
+    cmd = ['ssh', '-n', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=no',
+           '-o', f'ConnectTimeout={int(SSH_CONNECT_TIMEOUT)}', node, remote_cmd]
     try:
-        result = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=timeout,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if result.returncode != 0:
-            log.debug("SSH to %s returned code %d: %s", node, result.returncode, result.stderr.strip())
+            # The last line carries the reason; anything above it is banner or
+            # motd chatter that says nothing about why the probe failed.
+            err = result.stderr.strip().splitlines()
+            log.debug("SSH to %s returned code %d: %s", node, result.returncode,
+                      err[-1] if err else "(no stderr)")
             return []
         return result.stdout.splitlines()
     except subprocess.TimeoutExpired:

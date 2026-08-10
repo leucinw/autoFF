@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from autoff import config, singlepoint
+from autoff import config, singlepoint, submit
 from autoff.dispatch import Job, JobDispatcher
 
 
@@ -96,3 +96,44 @@ def test_multi_system_dry_run_covers_every_system(example_run):
     # Each system keeps its own directory, so nothing can collide
     for name in ('phenol', 'sodium', 'water_neat'):
         assert (run / 'systems' / name).is_dir()
+
+
+# --- node probing ---------------------------------------------------------
+
+class _Result:
+    def __init__(self, returncode=0, stdout='', stderr=''):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def test_ssh_probe_never_goes_through_a_local_shell(monkeypatch):
+    """A local shell re-imports the environment's exported functions, and a
+    truncated one prints parse errors that end up in the log for every node
+    that fails to answer."""
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen['cmd'], seen['kwargs'] = cmd, kwargs
+        return _Result(stdout='20\n')
+
+    monkeypatch.setattr('autoff.submit.subprocess.run', fake_run)
+    assert submit.ssh_output('node1', 'nproc') == ['20']
+
+    assert isinstance(seen['cmd'], list), "must pass argv, not a shell string"
+    assert not seen['kwargs'].get('shell')
+    assert seen['cmd'][0] == 'ssh'
+    # The remote command stays one argument, so its redirections survive intact
+    assert seen['cmd'][-2:] == ['node1', 'nproc']
+    assert 'BatchMode=yes' in seen['cmd']         # never block on a prompt
+    assert any(c.startswith('ConnectTimeout=') for c in seen['cmd'])
+
+
+def test_ssh_probe_logs_only_the_reason_for_the_failure(monkeypatch, caplog):
+    banner = ("/bin/sh: module: line 1: syntax error: unexpected end of file\n"
+              "/bin/sh: error importing function definition for `module'\n"
+              "ssh: connect to host node9 port 22: No route to host")
+    monkeypatch.setattr('autoff.submit.subprocess.run',
+                        lambda cmd, **kw: _Result(returncode=255, stderr=banner))
+    with caplog.at_level('DEBUG', logger='submitTinker'):
+        assert submit.ssh_output('node9', 'nproc') == []
+    assert 'No route to host' in caplog.text
+    assert 'error importing function definition' not in caplog.text
