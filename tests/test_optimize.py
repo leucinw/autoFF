@@ -248,6 +248,38 @@ def test_x_scale_follows_parameter_magnitude(multi_optimizer):
     assert opt._x_scale() == pytest.approx([3.4050, 0.1100])
 
 
+def test_conditioning_report_names_the_degenerate_direction(multi_optimizer, caplog):
+    """Two parameters that move the targets identically leave one combination
+    unconstrained; the report has to name it rather than just print a number."""
+    _, opt = multi_optimizer
+    # Columns proportional to each other: only their sum is determined. The
+    # scaling by _x_scale() (3.405, 0.11) is what makes the two comparable.
+    J = np.array([[1.0, 3.405 / 0.11], [2.0, 2 * 3.405 / 0.11]])
+    with caplog.at_level('INFO'):
+        opt._log_conditioning(J)
+    text = caplog.text
+    assert 'condition number' in text
+    assert 'ill-conditioned' in text
+    # The flat direction trades the two off against each other
+    assert 'vdw-34[0]' in text and 'vdw-34[1]' in text
+
+
+def test_conditioning_report_is_quiet_when_well_determined(multi_optimizer, caplog):
+    _, opt = multi_optimizer
+    J = np.array([[1.0 / 3.405, 0.0], [0.0, 1.0 / 0.11]])   # orthogonal, cond 1
+    with caplog.at_level('INFO'):
+        opt._log_conditioning(J)
+    assert 'condition number: 1' in caplog.text
+    assert 'ill-conditioned' not in caplog.text
+
+
+def test_conditioning_report_flags_more_parameters_than_targets(multi_optimizer, caplog):
+    _, opt = multi_optimizer
+    with caplog.at_level('INFO'):
+        opt._log_conditioning(np.array([[1.0, 1.0]]))       # 1 target, 2 params
+    assert 'fewer targets (1) than parameters (2)' in caplog.text
+
+
 def _first_value(prm_path):
     """Read back the first fitted value from a written parameter file."""
     with open(prm_path) as f:

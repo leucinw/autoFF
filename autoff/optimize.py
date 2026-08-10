@@ -278,7 +278,61 @@ class Optimizer:
                     os.remove(path)
                 except OSError:
                     pass
+        self._log_conditioning(J)
         return J
+
+    def _free_param_labels(self):
+        """One label per free parameter, positioned as in the opt_params entry."""
+        return [f"{e.term_idx}[{pos}]"
+                for e in self.spec.entries
+                for pos, is_free in enumerate(e.free_mask) if is_free]
+
+    def _log_conditioning(self, J):
+        """Report how well the targets actually determine the parameters.
+
+        The raw Jacobian mixes units -- a column for an rmin in Angstrom and one
+        for a well depth in kcal/mol are not comparable -- so the quantity worth
+        looking at is the response to a *relative* change in each parameter,
+        which is J scaled by the same per-parameter sizes the trust region uses.
+        A near-zero singular value there means some combination of parameters
+        leaves every target unchanged: the data cannot determine it, and the fit
+        will drift along it until a bound stops it, leaving a parameter whose
+        final value came from the bound rather than from any measurement.
+        """
+        n_targets, n_params = J.shape
+        if min(J.shape) == 0:
+            return
+        try:
+            s, Vt = np.linalg.svd(J * self._x_scale())[1:]
+        except np.linalg.LinAlgError:
+            log.warning("Jacobian SVD did not converge; skipping conditioning report")
+            return
+
+        cond = s[0] / s[-1] if s[-1] > 0 else np.inf
+        log.info("Jacobian conditioning (%d target(s) x %d parameter(s))",
+                 n_targets, n_params)
+        log.info("  singular values : %s", ", ".join(f"{v:.3g}" for v in s))
+        log.info("  condition number: %.3g", cond)
+
+        # The last right singular vector is the combination the targets pin down
+        # least; naming its largest components says which parameters trade off.
+        labels = self._free_param_labels()
+        weakest = Vt[-1]
+        order = np.argsort(-np.abs(weakest))[:3]
+        log.info("  least-determined: %s", ", ".join(
+            f"{labels[i]} {weakest[i]:+.2f}" for i in order))
+
+        if n_params > len(s):
+            log.warning(
+                "  %d parameter direction(s) cannot affect any target: there are "
+                "fewer targets (%d) than parameters (%d).",
+                n_params - len(s), n_targets, n_params)
+        if cond > 100:
+            log.warning(
+                "  Jacobian is ill-conditioned (cond=%.3g). The direction above is "
+                "barely constrained by the data and will run to a bound rather "
+                "than to a fitted value. Consider pinning one of those parameters "
+                "(params_range 0) or adding a prior.", cond)
 
     # -- driver -----------------------------------------------------------
 
