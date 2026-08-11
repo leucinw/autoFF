@@ -197,3 +197,101 @@ def test_stall_reason_needs_silence_across_every_output(tmp_path):
     # One live output is enough to clear the stall.
     os.utime(logp, None)
     assert tinkerio.stall_reason(3600, str(arc), str(logp)) is None
+
+
+def _arc(frames, n_atoms=2):
+    """frames: list of (a, b, c, alpha, beta, gamma) tuples."""
+    out = []
+    for box in frames:
+        out.append(f"{n_atoms:6d}  frame")
+        out.append("".join(f"{v:12.6f}" for v in box))
+        out.extend(f"{i + 1:6d}  O   0.0  0.0  0.0     1" for i in range(n_atoms))
+    return "\n".join(out) + "\n"
+
+
+def test_cell_volume_handles_non_cubic_cells():
+    assert tinkerio.cell_volume(30.0, 30.0, 30.0) == pytest.approx(27000.0)
+    # Orthorhombic: the old log parser cubed the first length and would have
+    # returned 27000 for this box too.
+    assert tinkerio.cell_volume(30.0, 25.0, 20.0) == pytest.approx(15000.0)
+    # Triclinic reduces to a*b*c only when all angles are 90 degrees.
+    tric = tinkerio.cell_volume(30.0, 30.0, 30.0, 90.0, 90.0, 60.0)
+    assert tric < 27000.0
+
+
+def test_parse_arc_densities(tmp_path):
+    arc = tmp_path / 'neat.arc'
+    boxes = [(29.0, 29.0, 29.0, 90.0, 90.0, 90.0)] * 2 \
+        + [(30.0, 30.0, 30.0, 90.0, 90.0, 90.0)] * 3
+    arc.write_text(_arc(boxes))
+    mass = 1000.0
+
+    rho, n_parsed = tinkerio.parse_arc_densities(str(arc), mass,
+                                                 n_equil=2, n_production=3)
+    assert n_parsed == 5
+    assert len(rho) == 3
+    assert rho == pytest.approx([mass / (tinkerio.DENSITY_FACTOR * 30.0 ** 3)] * 3)
+
+    # Frame count and density series must agree on what a frame is.
+    assert tinkerio.count_arc_frames(str(arc)) == n_parsed
+
+
+def test_parse_arc_densities_rejects_nvt(tmp_path):
+    """No box line means no volume, and a silently wrong density is worse."""
+    arc = tmp_path / 'nvt.arc'
+    arc.write_text("     2  frame\n     1  O  0.0 0.0 0.0   1\n"
+                   "     2  O  0.0 0.0 0.0   1\n")
+    with pytest.raises(RuntimeError, match="NPT"):
+        tinkerio.parse_arc_densities(str(arc), 1000.0, n_equil=0, n_production=1)
+
+
+def test_production_start_counts_back_from_the_end():
+    # Exactly the planned length: the two rules agree.
+    assert tinkerio.production_start(3000, 500, 2500) == 500
+
+    # Overshoot -- a resumed run that ran past its target. Dropping only the
+    # first 500 would average 3221 frames instead of 2500; counting back from
+    # the end keeps the sample the intended length and the intended age.
+    assert tinkerio.production_start(3721, 500, 2500) == 1221
+
+    # Short -- counting back would reach into equilibration (2900-2500=400),
+    # so the floor at n_equil wins and the caller averages 2400 frames.
+    assert tinkerio.production_start(2900, 500, 2500) == 500
+
+    # Shorter than equilibration itself: nothing is production.
+    assert tinkerio.production_start(300, 500, 2500) == 500
+
+
+def test_production_window_is_the_tail_of_an_overshooting_run(tmp_path):
+    """A resume that overruns must not dilute the average with extra frames."""
+    arc = tmp_path / 'over.arc'
+    # 500 equilibration frames at one box size, then 3000 production frames --
+    # 500 more than asked for. Only the last 2500 should count.
+    boxes = [(29.0, 29.0, 29.0, 90.0, 90.0, 90.0)] * 500 \
+        + [(31.0, 31.0, 31.0, 90.0, 90.0, 90.0)] * 500 \
+        + [(30.0, 30.0, 30.0, 90.0, 90.0, 90.0)] * 2500
+    arc.write_text(_arc(boxes))
+    mass = 1000.0
+
+    rho, n_parsed = tinkerio.parse_arc_densities(str(arc), mass,
+                                                 n_equil=500, n_production=2500)
+    assert n_parsed == 3500
+    assert len(rho) == 2500
+    assert rho == pytest.approx([mass / (tinkerio.DENSITY_FACTOR * 30.0 ** 3)] * 2500)
+
+
+def test_trim_arc_takes_the_same_window_as_the_densities(tmp_path):
+    """The energies and the densities have to be computed over one sample."""
+    arc, prod = tmp_path / 'full.arc', tmp_path / 'prod.arc'
+    boxes = [(29.0, 29.0, 29.0, 90.0, 90.0, 90.0)] * 3 \
+        + [(30.0, 30.0, 30.0, 90.0, 90.0, 90.0)] * 4
+    arc.write_text(_arc(boxes))
+
+    tinkerio.trim_arc_to_production(str(arc), str(prod), n_equil=3, n_production=4)
+    assert tinkerio.count_arc_frames(str(prod)) == 4
+
+    rho_full, _ = tinkerio.parse_arc_densities(str(arc), 1000.0,
+                                               n_equil=3, n_production=4)
+    rho_prod, _ = tinkerio.parse_arc_densities(str(prod), 1000.0,
+                                               n_equil=0, n_production=4)
+    assert rho_full == pytest.approx(rho_prod)

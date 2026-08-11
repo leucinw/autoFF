@@ -314,7 +314,23 @@ would be submitted.
 
 - **BAR equilibration.** The first 20% of every trajectory is discarded. A
   window therefore needs at least 6 snapshots, which is validated at load time.
-- **Box shape.** Neat-liquid densities assume a cubic box (`V = a³`).
+- **Density source.** Neat-liquid densities are read from the box line of each
+  `.arc` frame, not from the MD log. The archive is the record of what was
+  simulated, and it is also what the reweighted energies of the density
+  derivative are computed over, so both series come from one file and stay
+  aligned frame for frame. Volume is the full triclinic expression, so
+  non-cubic cells are handled; the run must be NPT, since an NVT archive
+  carries no box line to take a volume from. Scanning a multi-GB archive for
+  its box lines costs a few seconds per temperature per step.
+- **Production window.** The neat-liquid production sample is the **last**
+  `production_time` worth of frames, not everything past `equil_time`. A
+  trajectory rarely lands on exactly the planned length — a resumed run can
+  overshoot — and counting back from the end keeps the sample the intended
+  length and the intended age instead of folding the surplus into the average.
+  The window is floored at `equil_time`, so a short trajectory averages fewer
+  frames (with a warning) rather than reaching back into equilibration. The
+  same window feeds both the densities and the trimmed `-prod.arc` the
+  reweighted energies are computed over, so the two cannot drift apart.
 - **Parameter count.** Perturbation sidecars are numbered `_01`.., and a
   gradient needs two per free parameter plus one, so at most 49 parameters can
   be fitted at once. This is checked when the config loads.

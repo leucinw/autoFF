@@ -20,6 +20,20 @@ def _md_log(frames, lattice_a=30.0):
     return "\n".join(out) + "\n"
 
 
+def _md_arc(lattice_a, n_atoms=2):
+    """Build a Tinker NPT .arc whose frames carry the given box lengths."""
+    if not isinstance(lattice_a, list):
+        raise TypeError("pass a list of per-frame lattice lengths")
+    out = []
+    for a in lattice_a:
+        out.append(f"{n_atoms:6d}  frame")
+        out.append(f"{a:12.6f}{a:12.6f}{a:12.6f}"
+                   f"{90.0:12.6f}{90.0:12.6f}{90.0:12.6f}")
+        for i in range(n_atoms):
+            out.append(f"{i + 1:6d}  O   0.000000  0.000000  0.000000     1")
+    return "\n".join(out) + "\n"
+
+
 @pytest.fixture
 def water_runner(example_run):
     run = example_run('Multi-Property')
@@ -136,12 +150,17 @@ def test_md_jobs_clear_the_previous_crash_dump(water_runner, monkeypatch):
     assert liquid.md_complete() is False
 
 
-def test_densities_from_log(water_runner):
+def test_densities_come_from_the_arc_not_the_log(water_runner):
+    """The trajectory is the record of what was simulated; the log is not it."""
     run, liquid = water_runner
     n_equil, n_prod = liquid.cfg.n_equil, liquid.cfg.n_production
     for T in liquid.cfg.temperatures:
-        path = run / 'systems' / 'water_neat' / f'{liquid._base(T)}.log'
-        path.write_text(_md_log(n_equil + n_prod))
+        liquid_dir = run / 'systems' / 'water_neat'
+        (liquid_dir / f'{liquid._base(T)}.arc').write_text(
+            _md_arc([30.0] * (n_equil + n_prod)))
+        # A log disagreeing with the arc must have no say in the answer.
+        (liquid_dir / f'{liquid._base(T)}.log').write_text(
+            _md_log(n_equil + n_prod, 25.0))
 
     means = liquid.densities()
     expected = liquid.total_mass / (tinkerio.DENSITY_FACTOR * 30.0 ** 3)
@@ -155,8 +174,8 @@ def test_densities_drop_equilibration_frames(water_runner):
     # Equilibration frames sit at a different box size than production
     lattice = [29.0] * n_equil + [30.0] * n_prod
     for T in liquid.cfg.temperatures:
-        path = run / 'systems' / 'water_neat' / f'{liquid._base(T)}.log'
-        path.write_text(_md_log(len(lattice), lattice))
+        path = run / 'systems' / 'water_neat' / f'{liquid._base(T)}.arc'
+        path.write_text(_md_arc(lattice))
 
     means = liquid.densities()
     production_only = liquid.total_mass / (tinkerio.DENSITY_FACTOR * 30.0 ** 3)

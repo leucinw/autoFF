@@ -126,21 +126,37 @@ def count_arc_frames(file_path):
         return 0
 
 
-def trim_arc_to_production(full_arc, prod_arc, n_equil):
-    """Write a production-only arc by dropping the first *n_equil* frames."""
-    if n_equil == 0:
+def production_start(n_total, n_equil, n_production):
+    """Index of the first production frame in a trajectory of *n_total* frames.
+
+    Production is the LAST *n_production* frames, not everything past the first
+    *n_equil*. Counting from the end keeps the sample the right length and the
+    right age whenever the trajectory does not come out at exactly
+    ``n_equil + n_production`` -- a resumed run that overshoots its target
+    would otherwise fold the extra frames into the average, and two
+    trajectories of different lengths would be averaged over different spans.
+
+    The floor at *n_equil* is what stops a short trajectory from reaching back
+    into equilibration to make up the count: better to average fewer frames,
+    and say so, than to average unequilibrated ones.
+    """
+    return max(n_equil, n_total - n_production)
+
+
+def trim_arc_to_production(full_arc, prod_arc, n_equil, n_production):
+    """Write a production-only arc holding the last *n_production* frames.
+
+    Never reaches back past *n_equil*; see :func:`production_start`.
+    """
+    n_total = count_arc_frames(full_arc)
+    skip_frames = production_start(n_total, n_equil, n_production)
+    if skip_frames == 0:
         if full_arc != prod_arc:
             import shutil
             shutil.copy(full_arc, prod_arc)
         return
-    with open(full_arc, 'rb') as f:
-        first = f.readline().split()
-        if not first:
-            raise RuntimeError(f"Empty arc file: {full_arc}")
-        n_atoms = int(first[0])
-        second = f.readline().split()
-        stride = (n_atoms + 1) if second and second[0] == b'1' else (n_atoms + 2)
-    skip = n_equil * stride
+    _, stride, _ = _arc_layout(full_arc)
+    skip = skip_frames * stride
     with open(full_arc, 'rb') as f_in, open(prod_arc, 'wb') as f_out:
         for i, line in enumerate(f_in):
             if i >= skip:
@@ -451,30 +467,78 @@ def derive_liquid_key(src_key, dest_key):
 # Log parsing
 # ---------------------------------------------------------------------------
 
-def parse_liquid_densities(log_file, total_mass, n_equil):
-    """Parse a Tinker9 MD log into per-frame densities (kg/m^3).
+def cell_volume(a, b, c, alpha=90.0, beta=90.0, gamma=90.0):
+    """Volume (A^3) of a unit cell from its lengths and angles."""
+    ca, cb, cg = (np.cos(np.radians(x)) for x in (alpha, beta, gamma))
+    factor = 1.0 - ca * ca - cb * cb - cg * cg + 2.0 * ca * cb * cg
+    return a * b * c * np.sqrt(max(factor, 0.0))
 
-    Frames recorded before *n_equil* are dropped as equilibration. The box is
-    assumed cubic: V = a^3 from the reported lattice lengths.
+
+def parse_arc_densities(arc_file, total_mass, n_equil, n_production):
+    """Per-frame densities (kg/m^3) from the box line of every .arc frame.
+
+    Returns ``(production_densities, n_frames_parsed)``, the densities being
+    the last *n_production* frames as chosen by :func:`production_start` --
+    the same window :func:`trim_arc_to_production` cuts for the reweighted
+    energies, so the two series stay frame-for-frame aligned.
+
+    The trajectory is the record of what was simulated, so densities are taken
+    from it rather than from the MD log. The two are not interchangeable: the
+    log and the archive are flushed independently, so a run that is killed
+    partway leaves them at different lengths, and the .arc is also what the
+    reweighted energies of the density derivative are computed over. Reading
+    both series from the same file keeps frame i of one aligned with frame i of
+    the other.
+
+    Only the box line of each frame is needed, so the extraction runs through
+    awk rather than decoding several GB of coordinates in Python.
     """
+    n_atoms, stride, has_box = _arc_layout(arc_file)
+    if not has_box:
+        raise RuntimeError(
+            f"{arc_file} has no box line per frame (NVT trajectory); density "
+            f"needs a volume, so the run must be NPT."
+        )
+
+    # Frame block: header, box, then n_atoms coordinate lines.
+    result = subprocess.run(
+        ['awk', f'NR % {stride} == 2', arc_file],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"could not read box lines from {arc_file}: {result.stderr.strip()}")
+
     rho_list = []
-    current_lattice_a = None
-    seen_potential = False
+    for line in result.stdout.splitlines():
+        f = line.split()
+        if len(f) < 3:
+            continue
+        try:
+            dims = [float(x) for x in f[:6]] if len(f) >= 6 else [float(x) for x in f[:3]]
+        except ValueError:
+            continue
+        V = cell_volume(*dims)
+        if V > 0.0:
+            rho_list.append(total_mass / (DENSITY_FACTOR * V))
 
-    with open(log_file) as f:
-        for line in f:
-            if 'Current Potential' in line:
-                seen_potential = True
-            elif 'Lattice Lengths' in line:
-                current_lattice_a = float(line.split()[2])
-            elif 'Frame Number' in line:
-                if seen_potential and current_lattice_a is not None:
-                    V = current_lattice_a ** 3      # A^3, cubic box
-                    rho_list.append(total_mass / (DENSITY_FACTOR * V))
-                seen_potential = False
-                current_lattice_a = None
+    start = production_start(len(rho_list), n_equil, n_production)
+    return np.array(rho_list[start:]), len(rho_list)
 
-    return np.array(rho_list[n_equil:]), len(rho_list)
+
+def _arc_layout(arc_file):
+    """Return (n_atoms, stride, has_box) for a Tinker .arc file.
+
+    A second line that starts with the atom index ``1`` is the first coordinate
+    row, which means the frame carries no box line (NVT).
+    """
+    with open(arc_file, 'rb') as f:
+        first = f.readline().decode(errors='replace').split()
+        if not first:
+            raise RuntimeError(f"Empty arc file: {arc_file}")
+        n_atoms = int(first[0])
+        second = f.readline().decode(errors='replace').split()
+    has_box = bool(second) and second[0] != "1"
+    return n_atoms, (n_atoms + 2) if has_box else (n_atoms + 1), has_box
 
 
 def parse_analyze_energies(log_path):

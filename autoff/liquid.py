@@ -235,16 +235,24 @@ class NeatLiquidSystem:
     # -- properties -------------------------------------------------------
 
     def densities(self):
-        """Return mean density per temperature, caching the per-frame values."""
+        """Return mean density per temperature, caching the per-frame values.
+
+        Densities come from the box line of each .arc frame. The trajectory is
+        the record of what was simulated, and it is also what the reweighted
+        energies behind the density derivative are computed over, so taking
+        both series from one file keeps them frame-for-frame aligned. The MD
+        log is flushed separately and can end at a different length.
+        """
         means, frames = [], []
         for T in self.cfg.temperatures:
-            rho, n_parsed = tinkerio.parse_liquid_densities(
-                self.log_path(T), self.total_mass, self.cfg.n_equil)
+            rho, n_parsed = tinkerio.parse_arc_densities(
+                self.arc_path(T), self.total_mass,
+                self.cfg.n_equil, self.cfg.n_production)
             if len(rho) == 0:
                 raise RuntimeError(
                     f"[{self.name}] T={T:.0f}K: no production frames after dropping "
                     f"{self.cfg.n_equil} equilibration frames (parsed {n_parsed} total). "
-                    f"Check {self.log_path(T)}."
+                    f"Check {self.arc_path(T)}."
                 )
             if len(rho) != self.cfg.n_production:
                 log.warning(
@@ -268,9 +276,14 @@ class NeatLiquidSystem:
         """
         for T in self.cfg.temperatures:
             full, prod = self.arc_path(T), self.prod_arc(T)
-            log.info("[%s] trimming production arc for T=%.0fK (%d equil frames dropped)",
-                     self.name, T, self.cfg.n_equil)
-            tinkerio.trim_arc_to_production(full, prod, self.cfg.n_equil)
+            n_total = tinkerio.count_arc_frames(full)
+            start = tinkerio.production_start(
+                n_total, self.cfg.n_equil, self.cfg.n_production)
+            log.info("[%s] trimming production arc for T=%.0fK "
+                     "(frames %d-%d of %d)",
+                     self.name, T, start + 1, n_total, n_total)
+            tinkerio.trim_arc_to_production(
+                full, prod, self.cfg.n_equil, self.cfg.n_production)
             # The full arc is large and already summarized by prod; keeping it
             # would double the footprint of every optimizer step.
             Path(full).unlink(missing_ok=True)
