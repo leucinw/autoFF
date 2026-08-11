@@ -133,3 +133,19 @@ def test_default_denominators(example_run):
     assert denoms['hfe']['sodium'] == pytest.approx(88.7 ** 0.5)
     # Several reference values are normalized by their spread
     assert denoms['density']['water_neat'] == pytest.approx(4.5, abs=1e-6)
+
+
+def test_md_stall_timeout_default_and_validation(example_run):
+    run = example_run('Multi-Property')
+    cfg_path = run / 'config.yaml'
+    assert config.load(str(cfg_path)).md_stall_timeout == 3600.0
+
+    text = cfg_path.read_text()
+    cfg_path.write_text(text.replace('  checking_time: 120.0',
+                                     '  checking_time: 120.0\n  md_stall_timeout: 0'))
+    assert config.load(str(cfg_path)).md_stall_timeout == 0.0
+
+    cfg_path.write_text(text.replace('  checking_time: 120.0',
+                                     '  checking_time: 120.0\n  md_stall_timeout: -1'))
+    with pytest.raises(SystemExit, match='md_stall_timeout'):
+        config.load(str(cfg_path))

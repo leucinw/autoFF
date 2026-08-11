@@ -52,11 +52,13 @@ class Runner:
 
         self.hfe_systems = [
             HFESystem(s, cfg.systems_dir, cfg.tinker_env, self.param_file,
-                      skip_check=self.skip_check, verbose=cfg.verbose)
+                      skip_check=self.skip_check, verbose=cfg.verbose,
+                      stall_timeout=cfg.md_stall_timeout)
             for s in cfg.hfe_systems
         ]
         self.liquids = [
-            NeatLiquidSystem(q, cfg.systems_dir, cfg.tinker_env, self.param_file)
+            NeatLiquidSystem(q, cfg.systems_dir, cfg.tinker_env, self.param_file,
+                             stall_timeout=cfg.md_stall_timeout)
             for q in cfg.liquids
         ]
         self.dimers = [DimerTarget(d, cfg.systems_dir) for d in cfg.dimers]

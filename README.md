@@ -132,6 +132,7 @@ where `dE/dλ` comes from re-analyzing the stored production frames.
 | `tinker_env` | no | Path to a Tinker environment file (default: bundled) |
 | `node_list` | no | Cluster hostnames; empty falls back to the site node file |
 | `checking_time` | no | Seconds between completeness polls (default 60) |
+| `md_stall_timeout` | no | Seconds of output silence before an unfinished MD is declared dead (default 3600; 0 disables) |
 | `verbose` | no | 0 quieter, 1 normal (default 1) |
 | `skip_completeness_check` | no | Trust existing `.arc`/`.ene` files (default false) |
 | `md_defaults` | no | `liquid:` and `gas:` blocks inherited by every HFE system |
@@ -326,6 +327,14 @@ would be submitted.
 - **Resuming.** A partial trajectory with a `.dyn` checkpoint is resumed for
   only its outstanding steps; a complete one is reused. Stale `.bar`/`.ene`
   files from a run with different sampling are detected and regenerated.
+- **Dead jobs.** Nothing resubmits, so an MD that ends early has to be noticed
+  or the poll loop waits forever. A blow-up is read out of the log or the
+  `.err` dump; a job killed with its node leaves neither, and is caught only by
+  `md_stall_timeout` — its `.arc` and `.log` simply stop being written. Both
+  raise, naming the temperature or window to restart. The timeout has to sit
+  well above the gap between frames: these runs write one every few seconds,
+  so the hour-long default is far outside the noise, but a much slower protocol
+  should raise it.
 
 ## Testing
 

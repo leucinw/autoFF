@@ -30,12 +30,13 @@ log = logging.getLogger(__name__)
 class NeatLiquidSystem:
     """One neat liquid simulated across one or more temperatures."""
 
-    def __init__(self, cfg, workdir, tinker_env, param_file):
+    def __init__(self, cfg, workdir, tinker_env, param_file, stall_timeout=0.0):
         self.cfg = cfg
         self.name = cfg.name
         self.dir = os.path.join(workdir, cfg.name)
         self.tinker_env = tinker_env
         self.param_file = param_file
+        self.stall_timeout = stall_timeout
         self.total_mass = None
         self.key_file = os.path.join(self.dir, f"{self.name}.key")
         self._rho_frames = None
@@ -196,6 +197,11 @@ class NeatLiquidSystem:
         died. Nothing in this pipeline resubmits, so a crashed run left to the
         frame count alone reads as "still going" forever; the caller polls a
         counter that will never move again and the whole fit hangs in silence.
+
+        Two ways a run ends early, and both have to be caught here. A blow-up
+        announces itself in the log or a .err dump. A silent death -- an
+        eviction, an OOM kill, a node that went away -- announces nothing at
+        all, and is recognised only by output that has stopped arriving.
         """
         n_total = self.cfg.n_equil + self.cfg.n_production
         pending, crashed = [], []
@@ -204,6 +210,9 @@ class NeatLiquidSystem:
             if n_done >= n_total:
                 continue
             reason = tinkerio.md_crash_reason(self.log_path(T), self.err_path(T))
+            if not reason:
+                reason = tinkerio.stall_reason(
+                    self.stall_timeout, self.arc_path(T), self.log_path(T))
             if reason:
                 crashed.append(f"T={T:.0f}K ({n_done}/{n_total} frames): {reason}")
             else:
@@ -214,7 +223,9 @@ class NeatLiquidSystem:
                 f"[{self.name}] MD died at {len(crashed)} temperature(s) and will "
                 f"not finish on its own:\n  " + "\n  ".join(crashed) +
                 f"\nInspect the logs in {self.dir}. A polarization or integration "
-                f"failure usually means the current parameters are unphysical."
+                f"failure usually means the current parameters are unphysical; "
+                f"output that simply stopped usually means the job was lost with "
+                f"its node, and rerunning that temperature's .sh resumes it."
             )
         if pending:
             log.info("[%s] waiting on MD: %s", self.name, ", ".join(pending))

@@ -1,6 +1,7 @@
 """Neat-liquid MD scripts, density parsing, and the density derivative."""
 
 import os
+import time
 
 import numpy as np
 import pytest
@@ -194,3 +195,45 @@ def test_analyze_jobs_cover_every_sidecar_and_temperature(water_runner):
     # The full trajectory is replaced by the production-only copy
     assert not (run / 'systems' / 'water_neat' / 'water_neat_298K.arc').exists()
     assert (run / 'systems' / 'water_neat' / 'water_neat_298K-prod.arc').exists()
+
+
+def test_md_complete_flags_a_silently_dead_run(water_runner, monkeypatch):
+    """Output that stopped arriving is the only trace a killed job leaves.
+
+    Reproduces the isoPrOH_neat 278 K stall of 2026-08-10: the job died with
+    its node at 721/3000 frames, its log ended mid-frame with nothing wrong in
+    it, and the poller then waited eight hours on a count that never moved.
+    """
+    _, liquid = water_runner
+    liquid.stall_timeout = 3600.0
+    monkeypatch.setattr(tinkerio, 'count_arc_frames', lambda p: 3)
+
+    stale = time.time() - 8 * 3600
+    for T in liquid.cfg.temperatures:
+        # A perfectly healthy log -- md_crash_reason has nothing to find.
+        with open(liquid.log_path(T), 'w') as f:
+            f.write(_md_log(3))
+        open(liquid.arc_path(T), 'w').close()
+
+    # While the files are fresh the run is merely slow, not dead.
+    assert liquid.md_complete() is False
+
+    T = liquid.cfg.temperatures[0]
+    os.utime(liquid.log_path(T), (stale, stale))
+    os.utime(liquid.arc_path(T), (stale, stale))
+    with pytest.raises(RuntimeError, match="no output written"):
+        liquid.md_complete()
+
+
+def test_stall_check_is_off_by_default_and_disablable(water_runner, monkeypatch):
+    """A zero timeout restores the old behaviour: wait forever, never raise."""
+    _, liquid = water_runner
+    monkeypatch.setattr(tinkerio, 'count_arc_frames', lambda p: 3)
+    stale = time.time() - 8 * 3600
+    for T in liquid.cfg.temperatures:
+        with open(liquid.log_path(T), 'w') as f:
+            f.write(_md_log(3))
+        os.utime(liquid.log_path(T), (stale, stale))
+
+    liquid.stall_timeout = 0.0
+    assert liquid.md_complete() is False

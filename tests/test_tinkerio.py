@@ -1,6 +1,7 @@
 """Parsers checked against real Tinker output from a completed run."""
 
 import os
+import time
 
 import pytest
 
@@ -161,3 +162,38 @@ def test_rewrite_parameters_line(tmp_path):
     out = tinkerio.rewrite_parameters_line("PARAMETERS old.prm\narchive\n", str(prm))
     assert str(prm.resolve()) in out
     assert 'old.prm' not in out
+
+
+def test_seconds_since_write_takes_the_newest(tmp_path):
+    old, new = tmp_path / 'old.arc', tmp_path / 'new.log'
+    old.write_text('x')
+    new.write_text('x')
+    os.utime(old, (time.time() - 7200, time.time() - 7200))
+    os.utime(new, (time.time() - 60, time.time() - 60))
+
+    # A quiet .arc does not count as silence while the .log is still moving.
+    assert tinkerio.seconds_since_write(str(old)) > 7000
+    assert tinkerio.seconds_since_write(str(old), str(new)) < 120
+    assert tinkerio.seconds_since_write(str(tmp_path / 'nothing')) is None
+
+
+def test_stall_reason_needs_silence_across_every_output(tmp_path):
+    arc, logp = tmp_path / 'w.arc', tmp_path / 'w.log'
+    arc.write_text('x')
+    logp.write_text('x')
+    stale = time.time() - 7200
+    os.utime(arc, (stale, stale))
+    os.utime(logp, (stale, stale))
+
+    assert 'no output written' in tinkerio.stall_reason(3600, str(arc), str(logp))
+    # Timeout not yet reached, and 0 disables the check outright.
+    assert tinkerio.stall_reason(10800, str(arc), str(logp)) is None
+    assert tinkerio.stall_reason(0, str(arc), str(logp)) is None
+
+    # A job that has not written its first frame has no mtime to judge and
+    # must never be declared dead -- it may simply be slow to start.
+    assert tinkerio.stall_reason(3600, str(tmp_path / 'missing.arc')) is None
+
+    # One live output is enough to clear the stall.
+    os.utime(logp, None)
+    assert tinkerio.stall_reason(3600, str(arc), str(logp)) is None

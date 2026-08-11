@@ -8,6 +8,7 @@ parsers unit-testable against the trajectory fixtures in ``tests/fixtures``.
 import os
 import re
 import subprocess
+import time
 from collections import deque
 from pathlib import Path
 
@@ -191,6 +192,44 @@ def md_crash_reason(logpath, errpath):
     if os.path.isfile(errpath):
         return f"coordinates dumped to {os.path.basename(errpath)}"
     return None
+
+
+def seconds_since_write(*paths):
+    """Seconds since the most recently written of *paths*, or None if none exist.
+
+    A running Tinker job appends to its .arc and .log continuously, so the
+    newest of those mtimes is when the job was last demonstrably alive. This is
+    the only evidence available for a job that dies *silently* -- killed by a
+    node reboot, an eviction, or the OOM killer -- which leaves the log clean
+    and so slips past :func:`md_crash_reason` entirely.
+    """
+    newest = None
+    for path in paths:
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if newest is None or mtime > newest:
+            newest = mtime
+    if newest is None:
+        return None
+    return max(0.0, time.time() - newest)
+
+
+def stall_reason(timeout, *paths):
+    """Describe an output set untouched for *timeout* seconds, else None.
+
+    *timeout* of 0 (or less) disables the check. Callers pass every file the
+    job writes; the check fires only once all of them have gone quiet, and
+    never before any of them exists -- a job whose first frame has not landed
+    yet has no mtime to judge and must not be declared dead.
+    """
+    if not timeout or timeout <= 0:
+        return None
+    idle = seconds_since_write(*paths)
+    if idle is None or idle < timeout:
+        return None
+    return f"no output written for {idle / 60.0:.0f} min"
 
 
 def bar_file_snapshot_counts(barpath):

@@ -210,6 +210,7 @@ class Config:
     tinker_env: str
     node_list: List[str]
     checking_time: float
+    md_stall_timeout: float    # s of output silence before MD counts as dead
     verbose: int
     skip_completeness_check: bool
     job_type: str              # single-point | optimize
@@ -590,6 +591,16 @@ def load(config_path):
     tinker_env = _require_file(_resolve(base_dir, tinker_env), "shared.tinker_env") \
         if tinker_env else tinkerio.package_data('tinker.env')
 
+    # A job that dies without writing anything to its log -- evicted, OOM-killed,
+    # or lost with its node -- is invisible to the crash parser, and since
+    # nothing in this pipeline resubmits, the poller then waits on a frame count
+    # that will never move again. An hour of total silence from a run that
+    # writes a frame every few seconds is proof enough. 0 disables the check.
+    md_stall_timeout = float(shared.get('md_stall_timeout', 3600.0))
+    if md_stall_timeout < 0:
+        raise ConfigError(
+            f"shared.md_stall_timeout must be >= 0 (0 disables), got {md_stall_timeout}")
+
     md_defaults = shared.get('md_defaults') or {}
 
     hfe_entries = settings.get('hfe_systems') or []
@@ -630,6 +641,7 @@ def load(config_path):
         tinker_env=tinker_env,
         node_list=[str(n) for n in (shared.get('node_list') or [])],
         checking_time=float(shared.get('checking_time', 60.0)),
+        md_stall_timeout=md_stall_timeout,
         verbose=int(shared.get('verbose', 1)),
         skip_completeness_check=bool(shared.get('skip_completeness_check', False)),
         job_type=job_type,

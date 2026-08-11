@@ -48,7 +48,7 @@ class HFESystem:
     """Drives setup, MD, BAR and collection for a single solute."""
 
     def __init__(self, cfg, workdir, tinker_env, param_file,
-                 skip_check=False, verbose=1):
+                 skip_check=False, verbose=1, stall_timeout=0.0):
         self.cfg = cfg
         self.name = cfg.name
         self.dir = os.path.join(workdir, cfg.name)
@@ -56,6 +56,7 @@ class HFESystem:
         self.param_file = param_file
         self.skip_check = skip_check
         self.verbose = verbose
+        self.stall_timeout = stall_timeout
         self.sidecars = []
         self.orderparams = list(cfg.orderparams)
 
@@ -280,10 +281,17 @@ class HFESystem:
         return sh_name
 
     def md_complete(self):
-        """True once every window that runs dynamics has a full trajectory."""
+        """True once every window that runs dynamics has a full trajectory.
+
+        Raises RuntimeError for windows whose output has stopped arriving.
+        With one lambda schedule per phase a single lost window is enough to
+        hold up the whole solute, and a job killed with its node leaves nothing
+        in its log to distinguish it from one that is merely slow.
+        """
         if self.skip_check:
             return True
         done = True
+        stalled = []
         for phase in self.phases:
             md = self._md(phase)
             for elb, vlb in self.orderparams:
@@ -300,11 +308,23 @@ class HFESystem:
                     continue
                 n = tinkerio.count_arc_frames(arcpath)
                 if n < md.total_snapshots:
-                    if self.verbose > 0:
+                    logpath = os.path.join(self.phase_dir(phase), fname + ".log")
+                    reason = tinkerio.stall_reason(self.stall_timeout, arcpath, logpath)
+                    if reason:
+                        stalled.append(
+                            f"{fname} ({n}/{md.total_snapshots} snapshots): {reason}")
+                    elif self.verbose > 0:
                         pct = int(n / md.total_snapshots * 100) if md.total_snapshots else 0
                         log.info("[%s] %s: %d/%d snapshots (%d%%)",
                                  self.name, fname, n, md.total_snapshots, pct)
                     done = False
+        if stalled:
+            raise RuntimeError(
+                f"[{self.name}] {len(stalled)} MD window(s) stopped producing output "
+                f"and will not finish on their own:\n  " + "\n  ".join(stalled) +
+                f"\nThese usually died with their node rather than blowing up. "
+                f"Rerunning each window's .sh in {self.dir} resumes it."
+            )
         return done
 
     # -- BAR --------------------------------------------------------------
