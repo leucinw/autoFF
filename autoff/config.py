@@ -384,11 +384,15 @@ def _parse_hfe_system(entry, idx, base_dir, md_defaults, shared_prm):
         )
 
     natom = tinkerio.read_txyz_natoms(gas_xyz)
-    # A monatomic ion has no intramolecular degrees of freedom to sample, so
-    # its gas-phase leg contributes nothing but wall time.
-    if natom < 5 and gas.total_time != 0.0:
-        print(tinkerio.YELLOW + f" [Warning] '{name}': solute has {natom} atoms; "
-              "disabling the gas phase" + tinkerio.ENDC)
+    # AMOEBA excludes intramolecular vdW/multipole interactions between 1-2 and
+    # 1-3 neighbours, so a solute with no 1-4 pair has nothing for the gas leg
+    # to decouple -- its free energy is identically zero and sampling it only
+    # costs wall time. Decided on connectivity, not atom count: NH3 has four
+    # atoms and no 1-4 pair (gas leg correctly skipped), while H-C#C-H has four
+    # atoms and one (gas leg is real and must be run).
+    if gas.total_time != 0.0 and not tinkerio.has_intramolecular_nonbonded(gas_xyz):
+        print(tinkerio.YELLOW + f" [Warning] '{name}': solute has {natom} atoms and no "
+              "1-4 pair; disabling the gas phase" + tinkerio.ENDC)
         gas.total_time = 0.0
 
     lambda_window = str(entry.get('lambda_window', 'default'))

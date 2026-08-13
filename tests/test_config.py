@@ -5,7 +5,7 @@ import os
 import pytest
 import ruamel.yaml as yaml
 
-from autoff import config
+from autoff import config, tinkerio
 
 
 def _load_yaml(path):
@@ -52,6 +52,51 @@ def test_small_solute_disables_gas_phase(example_run):
     assert sodium.natom == 1
     assert sodium.ignore_gas
     assert sodium.phases == ['liquid']
+
+
+def _write_txyz(path, natom, body):
+    path.write_text(f"    {natom}  test\n" + body)
+    return str(path)
+
+
+def test_gas_phase_decided_by_connectivity_not_atom_count(tmp_path):
+    """Atom count cannot tell these apart; the 1-4 pair is what matters."""
+    # NH3: 4 atoms, every pair is 1-2 or 1-3 -> gas leg is identically zero
+    ammonia = _write_txyz(tmp_path / 'nh3.xyz', 4, (
+        "     1  N   0.00  0.00  0.00   27     2     3     4\n"
+        "     2  H   1.00  0.00  0.00   28     1\n"
+        "     3  H  -0.50  0.87  0.00   28     1\n"
+        "     4  H  -0.50 -0.87  0.00   28     1\n"))
+    assert not tinkerio.has_intramolecular_nonbonded(ammonia)
+
+    # H-C#C-H: also 4 atoms, but H1...H4 are 1-4 -> gas leg is real
+    acetylene = _write_txyz(tmp_path / 'hcch.xyz', 4, (
+        "     1  C   0.00  0.00  0.60  123     2     3\n"
+        "     2  C   0.00  0.00 -0.60  123     1     4\n"
+        "     3  H   0.00  0.00  1.67  124     1\n"
+        "     4  H   0.00  0.00 -1.67  124     2\n"))
+    assert tinkerio.has_intramolecular_nonbonded(acetylene)
+
+
+def test_gas_phase_edge_cases(tmp_path):
+    # Monatomic ion: nothing to decouple
+    ion = _write_txyz(tmp_path / 'na.xyz', 1, "     1  NA  0.00  0.00  0.00  350\n")
+    assert not tinkerio.has_intramolecular_nonbonded(ion)
+
+    # Water: 3 atoms, only 1-2 and 1-3
+    water = _write_txyz(tmp_path / 'wat.xyz', 3, (
+        "     1  O   0.00  0.00  0.00    1     2     3\n"
+        "     2  H   0.96  0.00  0.00    2     1\n"
+        "     3  H  -0.24  0.93  0.00    2     1\n"))
+    assert not tinkerio.has_intramolecular_nonbonded(water)
+
+    # Two separate fragments: nothing excludes their mutual interaction
+    pair = _write_txyz(tmp_path / 'two.xyz', 4, (
+        "     1  O   0.00  0.00  0.00    1     2\n"
+        "     2  H   0.96  0.00  0.00    2     1\n"
+        "     3  O   9.00  0.00  0.00    1     4\n"
+        "     4  H   9.96  0.00  0.00    2     3\n"))
+    assert tinkerio.has_intramolecular_nonbonded(pair)
 
 
 def test_derived_md_quantities(example_run):

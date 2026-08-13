@@ -314,6 +314,41 @@ def read_txyz_natoms(path):
         return int(f.readline().split()[0])
 
 
+def has_intramolecular_nonbonded(path):
+    """True if the solute in *path* has any atom pair separated by >= 3 bonds.
+
+    AMOEBA excludes intramolecular vdW and multipole interactions between 1-2
+    and 1-3 neighbours. A solute whose atoms all lie within two bonds of one
+    another -- a bare ion, water, H2S, NH3 -- therefore has nothing for the
+    gas-phase leg to decouple: its free energy is identically zero and running
+    it only costs wall time. The moment a 1-4 pair exists, i.e. the solute has
+    a torsion, the gas leg is real and must be sampled.
+
+    Atom count cannot distinguish the two cases: NH3 has four atoms and no 1-4
+    pair, while H-C#C-H has four atoms and one. This walks the connectivity
+    instead. A disconnected .xyz (two fragments) also reports True, since
+    nothing excludes interactions between separate molecules.
+    """
+    atoms = read_txyz_atoms(path)
+    if len(atoms) < 4:          # 3 atoms can only ever be 1-2 or 1-3 apart
+        return False
+    neighbours = {a[0]: a[6] for a in atoms}
+    for start in neighbours:
+        within_two = {start}
+        frontier = {start}
+        for _ in range(2):
+            nxt = set()
+            for u in frontier:
+                nxt.update(neighbours.get(u, ()))
+            nxt -= within_two
+            within_two |= nxt
+            frontier = nxt
+        # Any atom not reachable in two bonds is a 1-4 (or farther) partner
+        if len(within_two) < len(neighbours):
+            return True
+    return False
+
+
 def read_txyz_box(path):
     """Return (a, b, c) box lengths from a Tinker .xyz, or None if absent.
 
